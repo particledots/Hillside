@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.1.0 (milestone 1: built, waiting for the Logic test on both Macs)
+## 0.1.0 (milestone 1 finished: tested in Logic on the M4 Mac mini and the Intel Mac, 2026-11-22)
+
+- Logic test result (Bryn, both Macs: M4 Mac mini, macOS Tahoe, Logic 11.2.2; Intel Mac, macOS 12.7.8, Logic 10.7.8):
+  every step worked as described, no issues: install and load as a MIDI effect, window as drawn, A D S R with the
+  moving point and lights, Trig completes the attack on a tapped key, Gate releases at once, the mapper moves a filter
+  cutoff, the Gate button plays without notes, Stop while held leaves nothing stuck, save and reopen, proportional
+  resizing. Intel Mac CPU meter about 10% while playing with the mapper. CI (run 45041504730): engine test 493 checks,
+  mapper test 76 checks, plugin-layer check 158 checks, auval succeeded (aumi), pluginval level 5 passed (AU and VST3).
 
 - First build: repo layout, build workflow (engine self-test, mapper test, plugin-layer check with window pictures,
   universal AU + VST3, ad-hoc signing, auval as a MIDI effect, pluginval, package with the shared installer,

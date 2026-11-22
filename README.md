@@ -6,7 +6,16 @@ is not a copy, contains no Instruō code or artwork, and is not affiliated with 
 with no published firmware; its version 1 manual was used only to understand what the controls do. The envelope maths
 is our own.
 
-Status: **version 0.1.0, milestone 1 of 2: built, waiting for Bryn's test in Logic on both Macs.**
+Status: **version 0.1.0, milestone 1 of 2 finished: tested by Bryn in Logic on both Macs on 2026-11-22 and working.**
+
+Milestone 1 test result (Bryn, M4 Mac mini with macOS Tahoe and Logic 11.2.2, and Intel Mac with macOS 12.7.8 and
+Logic 10.7.8): every step worked as described, no issues: install, loads in a MIDI FX slot with the window as drawn;
+a held note runs A, D, S and R with the moving point and lights, notes sound normally; Trig mode completes a 2 s attack
+on a tapped key, Gate mode releases at once; the Hillside Mapper moves a synth's filter cutoff with the envelope; the
+Gate button plays the envelope without notes; Stop while a key is held leaves nothing stuck; settings survive save and
+reopen; the window resizes in proportion. Logic's CPU meter on the Intel Mac: about 10% while playing with the mapper.
+CI (run 45041504730): engine test 493 checks, mapper test 76 checks, plugin-layer check 158 checks, auval succeeded
+(aumi), pluginval level 5 passed (AU and VST3).
 
 ## What it does (milestone 1)
 
