@@ -5,6 +5,7 @@ add_library(hillside_engine STATIC
     src/Envelope.cpp
     src/Keys.cpp
     src/CcStream.cpp
+    src/Pulses.cpp
     src/Engine.cpp
 )
 

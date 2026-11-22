@@ -16,12 +16,13 @@ const ogdoadText = fs.readFileSync(process.argv[3], "utf8");
 const driftText = fs.readFileSync(process.argv[4], "utf8");
 const dumpExe = process.env.HILLSIDE_CCDUMP;
 
-function readDump(seconds, channel) {
-    const lines = execFileSync(dumpExe, [String(seconds), String(channel)], { maxBuffer: 1 << 28 }).toString().trim().split("\n");
-    const d = { events: [], notes: [], finals: [] };
+function readDump(seconds, channel, sendAs) {
+    const lines = execFileSync(dumpExe, [String(seconds), String(channel), String(sendAs || 0)], { maxBuffer: 1 << 28 }).toString().trim().split("\n");
+    const d = { events: [], notes: [], finals: [], pulsesOn: -1 };
     for (const line of lines) {
         const p = line.split(" ");
         if (p[0] === "final") d.finals[+p[1]] = +p[2];
+        else if (p[0] === "pulses-on") d.pulsesOn = +p[1];
         else if (p[0] === "note") d.notes.push({ sample: +p[1], channel: +p[2], pitch: +p[3], velocity: +p[4] });
         else d.events.push({ sample: +p[0], channel: +p[1], cc: +p[2], value: +p[3] });
     }
@@ -31,9 +32,24 @@ const dump = readDump(60, 16);
 const events = dump.events, finals = dump.finals;
 expect(events.length > 2000, "the engine produced a CC stream (" + events.length + " messages)");
 const OUR_CC = [3, 35, 9, 41, 85, 86, 87, 88, 89];
-expect(events.every(e => e.channel === 16 && [3, 35, 9, 41].includes(e.cc)), "the stream uses only CC 3, 35, 9 and 41 on channel 16");
-expect(dump.notes.length === 0, "milestone 1: no notes are sent");
-expect(finals[0] === 0 && finals[1] === 0, "both outputs end at 0");
+expect(events.every(e => e.channel === 16 && OUR_CC.includes(e.cc)), "the stream uses only CC 3, 35, 9, 41 and 85-89 on channel 16");
+expect(dump.notes.length === 0, "Send as CC (the default): no notes are sent");
+expect(finals[0] === 0 && finals[1] === 0, "both envelope outputs end at 0");
+expect(dump.pulsesOn === 0, "no gate or trigger left on at the end");
+
+// The stage gates and Trig in the real stream (0.2.0): 127 / 0 only, strictly alternating, ending at 0; every pulse
+// at least 20 ms (960 samples at 48 kHz).
+const GATE_CC = [85, 86, 87, 88, 89];
+const pulsesOf = n => events.filter(e => e.cc === n);
+for (const n of GATE_CC) {
+    const p = pulsesOf(n);
+    const name = n === 89 ? "Trig" : "Gate " + "ADSR"[n - 85];
+    expect(p.length >= 20 && p.every((e, i) => e.value === (i % 2 === 0 ? 127 : 0)), name + ": CC " + n + " alternates 127 / 0 (" + p.length + " messages)");
+    expect(p.length % 2 === 0, name + ": ends at 0");
+    let shortest = Infinity;
+    for (let i = 1; i < p.length; i += 2) shortest = Math.min(shortest, p[i].sample - p[i - 1].sample);
+    expect(shortest >= 960, name + ": every pulse at least 20 ms (shortest " + shortest + " samples)");
+}
 
 // What the engine meant at each fine message (coarse * 128 + fine), per output.
 function decode(evs) {
@@ -155,21 +171,72 @@ for (const viaParameterChanged of [true, false]) {
     console.log("mapper: " + usPerEvent.toFixed(2) + " microseconds per CC message in Node" + how);
 }
 
-// ---- 4. Gate and Trig sources (Hillside sends them from 0.2.0; the mapper already knows them) ------------------------
+// ---- 4. Gate and Trig sources, fed the engine's real gate stream (0.2.0) -----------------------------------------------
 {
-    const s = makeScripter(scriptText, {
+    const settings = {
         "Lane 1 source": 3, "Lane 1 min %": 10, "Lane 1 max %": 90,
         "Lane 2 source": 4, "Lane 3 source": 5, "Lane 4 source": 6,
         "Lane 5 source": 7, "Lane 5 min %": 100, "Lane 5 max %": 0,
-    }, true);
-    const { ControlChange } = s.sandbox;
-    for (const [n, v] of [[85, 127], [85, 0], [86, 127], [86, 0], [87, 127], [87, 0], [88, 127], [88, 0], [89, 127], [89, 0]])
-        s.sandbox.HandleMIDI(new ControlChange({ channel: 16, number: n, value: v }));
-    expect(eq2(lane(s, 1), [0.9, 0.1]), "Gate A: Max while high, Min after");
-    expect(eq2(lane(s, 2), [1, 0]) && eq2(lane(s, 3), [1, 0]) && eq2(lane(s, 4), [1, 0]), "Gate D, S, R: each only its own CC");
-    expect(eq2(lane(s, 5), [0, 1]), "Trig upside down");
-    expect(s.out.passed.length === 0, "gate and trig CC stop at the mapper");
-    function eq2(a, b) { return a.length === b.length && a.every((v, i) => near(v, b[i])); }
+        "Lane 6 source": 1,
+    };
+    const dedupe = a => a.filter((v, i) => i === 0 || v !== a[i - 1]);
+    const eq2 = (a, b) => a.length === b.length && a.every((v, i) => near(v, b[i]));
+    // What each gate lane should do: Max while the stream's CC is 127, Min when 0, in the stream's order.
+    const want = (n, min, max) => dedupe(pulsesOf(n).map(e => e.value === 127 ? max : min));
+    for (const viaParameterChanged of [true, false]) {
+        const how = viaParameterChanged ? " (settings changed in the panel)" : " (settings restored with a project)";
+        const s = makeScripter(scriptText, settings, viaParameterChanged);
+        const { ControlChange } = s.sandbox;
+        for (const e of events) s.sandbox.HandleMIDI(new ControlChange({ channel: 16, number: e.cc, value: e.value }));
+        expect(eq2(lane(s, 1), want(85, 0.1, 0.9)) && lane(s, 1).length >= 20, "Gate A lane follows the real Gate A stream, 10..90%" + how);
+        expect(eq2(lane(s, 2), want(86, 0, 1)), "Gate D lane follows the real Gate D stream" + how);
+        expect(eq2(lane(s, 3), want(87, 0, 1)), "Gate S lane follows the real Gate S stream" + how);
+        expect(eq2(lane(s, 4), want(88, 0, 1)), "Gate R lane follows the real Gate R stream" + how);
+        expect(eq2(lane(s, 5), want(89, 1, 0)), "Trig lane follows the real Trig stream, upside down" + how);
+        expect(eq2(lane(s, 6), dedupe(truth[35])), "an Envelope lane alongside them is unaffected" + how);
+        const ends = [1, 2, 3, 4, 5].map(n => { const l = lane(s, n); return l[l.length - 1]; });
+        expect(near(ends[0], 0.1) && near(ends[1], 0) && near(ends[4], 1), "gate lanes end at rest (Min)" + how);
+        expect(s.out.passed.length === 0, "gate and trig CC stop at the mapper" + how);
+    }
+    // The gates line up with the envelope: nothing moves on the Envelope output while Gate S is high.
+    const envAt = []; { let c = 0; for (const e of events) { if (e.cc === 3) c = e.value; if (e.cc === 35) envAt.push({ sample: e.sample, v: (c * 128 + e.value) / 16383 }); } }
+    const sOn = pulsesOf(87);
+    let moving = 0;
+    for (let i = 0; i + 1 < sOn.length; i += 2) {
+        // ignore the first 20 ms (a short sustain is stretched into the release)
+        if (sOn[i + 1].sample - sOn[i].sample <= 960) continue;   // a short sustain is stretched into the release
+        moving += envAt.filter(x => x.sample > sOn[i].sample && x.sample < sOn[i + 1].sample).length;
+    }
+    expect(moving === 0, "Envelope stands still while Gate S is high (" + moving + " moves)");
+}
+
+// ---- 4b. Send as Note and Both: the gate notes reach the instrument; the CC (Both) still moves the lanes --------------
+{
+    const nd = readDump(20, 16, 1);
+    expect(nd.events.every(e => [3, 35, 9, 41].includes(e.cc)), "Note: no gate CC is sent");
+    expect(nd.notes.length > 50 && nd.notes.every(n => n.channel === 16 && n.pitch >= 40 && n.pitch <= 44), "Note: gate notes 40-44 on channel 16 (" + nd.notes.length + ")");
+    const open = {};
+    let balanced = true;
+    for (const n of nd.notes) {
+        if (n.velocity > 0) { balanced = balanced && !open[n.pitch] && n.velocity === 100; open[n.pitch] = true; }
+        else { balanced = balanced && !!open[n.pitch]; open[n.pitch] = false; }
+    }
+    expect(balanced && Object.values(open).every(v => !v) && nd.pulsesOn === 0, "Note: every gate note is released once, nothing left on");
+    const s = makeScripter(scriptText, { "Lane 1 source": 3, "Lane 2 source": 7 }, true);
+    const { NoteOn, NoteOff, ControlChange } = s.sandbox;
+    for (const n of nd.notes) s.sandbox.HandleMIDI(n.velocity > 0 ? new NoteOn({ channel: 16, pitch: n.pitch, velocity: n.velocity }) : new NoteOff({ channel: 16, pitch: n.pitch }));
+    expect(s.out.passed.length === nd.notes.length && lane(s, 1).length === 0 && lane(s, 2).length === 0,
+           "Note: the gate notes pass the mapper to the instrument unchanged; gate lanes stay put");
+
+    const bd = readDump(20, 16, 2);
+    const bCc = bd.events.filter(e => e.cc === 85), bNotes = bd.notes.filter(n => n.pitch === 40);
+    expect(bCc.length > 10 && bCc.length === bNotes.length && bCc.every((e, i) => e.sample === bNotes[i].sample && (e.value === 127) === (bNotes[i].velocity > 0)),
+           "Both: Gate A as CC and as a note, at the same samples");
+    const b = makeScripter(scriptText, { "Lane 1 source": 3 }, true);
+    for (const e of bd.events) b.sandbox.HandleMIDI(new b.sandbox.ControlChange({ channel: 16, number: e.cc, value: e.value }));
+    for (const n of bd.notes) b.sandbox.HandleMIDI(new b.sandbox.NoteOn({ channel: 16, pitch: n.pitch, velocity: n.velocity }));
+    const l1 = lane(b, 1);
+    expect(l1.length === bCc.length && near(l1[l1.length - 1], 0) && b.out.passed.length === bd.notes.length, "Both: the lane follows the CC, the notes pass");
 }
 
 // ---- 5. A different channel ------------------------------------------------------------------------------------------

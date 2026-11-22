@@ -16,7 +16,11 @@
 //  11. the CC rules: one value per block, 6 ms, 0.2% or 100 ms, corners exact, coarse before fine, nothing at rest,
 //      every value sent is the envelope's value at that sample, the receiver always ends where the engine is;
 //  12. a stuck-gate fuzz: hundreds of thousands of random events, then everything released: at rest, 0 sent;
-//  13. CPU use and the MIDI rate.
+//  13. CPU use and the MIDI rate;
+//  14. the stage gates and Trig (0.2.0): each gate high exactly for its stage, at every sample rate and block size;
+//      20 ms stretching and merging; Trig at the start of every stage that runs (none for skipped stages);
+//      CC, Note and Both; switches, Send as and channel changes, rest, bypass and prepare end everything that is on
+//      and never start a note; a stuck-note fuzz with everything changing at random.
 
 #include "hillside/Engine.h"
 
@@ -793,9 +797,313 @@ namespace
         }
         const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
         const double percent = 100.0 * secs / seconds;
-        std::printf ("CPU: %.4f%% of one core at 48 kHz, 64-sample blocks, both outputs on\n", percent);
+        std::printf ("CPU: %.4f%% of one core at 48 kHz, 64-sample blocks, all outputs on\n", percent);
         expect (percent < 1.0, "CPU under 1% of one core (" + str (percent) + "%)");
-        std::printf ("MIDI: %.0f messages a second (both outputs; a 1 s note every 1.5 s, attack 10 ms, decay 300 ms, release 400 ms)\n", messages / (double) seconds);
+        std::printf ("MIDI: %.0f messages a second (all seven outputs, CC; a 1 s note every 1.5 s, attack 10 ms, decay 300 ms, release 400 ms)\n", messages / (double) seconds);
+    }
+
+    // ------------------------------------------------------------------------------------------------ 14. gates and Trig
+    // What one pulse output sent: on / off moments, as CC (127 / 0) and as notes (velocity 100 / 0).
+    struct Edge { long long at; bool on; int ch; bool note; };
+    std::vector<Edge> edgesOf (const std::vector<Msg>& msgs, int k)
+    {
+        std::vector<Edge> v;
+        for (auto& m : msgs)
+        {
+            if (! m.note && m.num == kPulseCc[k])  v.push_back ({ m.at, m.val == 127, m.ch, false });
+            if (m.note && m.num == kPulseNote[k])  v.push_back ({ m.at, m.val > 0, m.ch, true });
+        }
+        return v;
+    }
+    std::string showEdges (const std::vector<Edge>& e)
+    {
+        std::string s;
+        for (auto& x : e) s += std::string (x.on ? "on" : "off") + (x.note ? "(n)" : "") + "@" + str (x.at) + " ";
+        return s;
+    }
+    // A pulse output's on / off moments from the envelope's own trace, worked out from the stated rules.
+    std::vector<std::pair<long long, bool>> expectedPulses (const std::vector<TracePoint>& tr, int k, long long len)
+    {
+        std::vector<std::pair<long long, bool>> v;
+        bool on = false; long long until = 0;
+        for (size_t i = 0; i < tr.size(); ++i)
+        {
+            const bool src = k < 4 && tr[i].stage == (Stage) (k + 1);
+            const bool rise = k < 4 ? src && tr[i].started : tr[i].started && tr[i].stage != Stage::idle;
+            if (rise) { if (! on) v.push_back ({ (long long) i, true }); on = true; until = (long long) i + len; }
+            else if (on && ! src && (long long) i >= until) { v.push_back ({ (long long) i, false }); on = false; }
+        }
+        return v;
+    }
+    Settings withSendAs (Settings s, int mode) { s.sendAs = mode; return s; }
+
+    void testPulses()
+    {
+        long long pulseEdges = 0;
+        // 1. A held note, every gate exactly its stage, Trig 20 ms at each stage start, at every rate and block size.
+        for (double sr : { 44100.0, 48000.0, 96000.0 })
+            for (int bs : { 32, 64, 128, 256, 333, 512, 1000, 1024, -1 })
+            {
+                std::mt19937 rng ((unsigned) (sr + bs));
+                Run r;
+                r.blockSize = [bs, &rng] { return bs > 0 ? bs : 1 + (int) (rng() % 1024); };
+                const double A = 0.25, D = 0.4, R = 0.7;
+                const long long onS = std::llround (0.1 * sr), offS = std::llround (1.5 * sr);
+                r.go (sr, basic (A, D, 0.5, R, 1.0), { on (onS), off (offS) }, offS + (long long) sr);
+                const long long a = onS, d = a + N (A, sr), s = d + N (D, sr), rel = offS, end = rel + N (R, sr), len = N (0.02, sr);
+                const long long from[4] = { a, d, s, rel }, to[4] = { d, s, rel, end };
+                const std::string tag = " (" + str (sr) + " Hz, blocks " + (bs > 0 ? str ((long long) bs) : std::string ("random")) + ")";
+                for (int k = 0; k < 4; ++k)
+                {
+                    const auto e = edgesOf (r.col.msgs, k);
+                    expect (e.size() == 2 && e[0].on && e[0].at == from[k] && ! e[1].on && e[1].at == to[k] && e[0].ch == 16 && ! e[0].note,
+                            std::string ("Gate ") + "ADSR"[k] + " high exactly for its stage" + tag + ": " + showEdges (e));
+                    pulseEdges += (long long) e.size();
+                }
+                const auto t = edgesOf (r.col.msgs, kTrigIndex);
+                bool trigOk = t.size() == 8;
+                for (int k = 0; trigOk && k < 4; ++k) trigOk = t[(size_t) k * 2].on && t[(size_t) k * 2].at == from[k] && ! t[(size_t) k * 2 + 1].on && t[(size_t) k * 2 + 1].at == from[k] + len;
+                expect (trigOk, "Trig: a 20 ms pulse at the start of A, D, S and R" + tag + ": " + showEdges (t));
+                pulseEdges += (long long) t.size();
+                bool ordered = true;
+                for (size_t i = 1; i < r.col.msgs.size(); ++i) ordered = ordered && r.col.msgs[i].at >= r.col.msgs[i - 1].at;
+                expect (ordered, "everything is sent in sample order" + tag);
+            }
+
+        const double sr = 48000.0;
+        const long long len = N (0.02, sr);   // 960
+        // 2. Short stages: gates stretched to 20 ms, triggers merged.
+        {
+            Run r;
+            r.go (sr, basic (0.003, 0.003, 0.5, 0.003, 1.0), { on (1000), off (2000) }, 10000);
+            const auto ga = edgesOf (r.col.msgs, 0), gd = edgesOf (r.col.msgs, 1), gs = edgesOf (r.col.msgs, 2), gr = edgesOf (r.col.msgs, 3), t = edgesOf (r.col.msgs, kTrigIndex);
+            expect (ga.size() == 2 && ga[0].at == 1000 && ga[1].at == 1000 + len, "a 3 ms attack: Gate A stretched to 20 ms: " + showEdges (ga));
+            expect (gd.size() == 2 && gd[0].at == 1144 && gd[1].at == 1144 + len, "a 3 ms decay: Gate D stretched to 20 ms: " + showEdges (gd));
+            expect (gs.size() == 2 && gs[0].at == 1288 && gs[1].at == 1288 + len, "a 712-sample sustain: Gate S stretched to 20 ms (past the release start): " + showEdges (gs));
+            expect (gr.size() == 2 && gr[0].at == 2000 && gr[1].at == 2000 + len, "a 3 ms release: Gate R stretched to 20 ms: " + showEdges (gr));
+            expect (t.size() == 2 && t[0].at == 1000 && t[1].at == 2000 + len, "triggers 144 samples apart merge into one pulse: " + showEdges (t));
+        }
+        // 3. Skipped stages send nothing: Sustain 100% (no decay), Sustain 0% (no sustain, no release afterwards).
+        {
+            Run r;
+            r.go (sr, basic (0.05, 0.05, 1.0, 0.05, 1.0), { on (1000), off (20000) }, 30000);
+            expect (edgesOf (r.col.msgs, 1).empty(), "Sustain 100%: no Gate D");
+            expect (edgesOf (r.col.msgs, kTrigIndex).size() == 6, "Sustain 100%: three triggers (A, S, R): " + showEdges (edgesOf (r.col.msgs, kTrigIndex)));
+            Run z;
+            z.go (sr, basic (0.05, 0.05, 0.0, 0.05, 1.0), { on (1000), off (20000) }, 30000);
+            expect (edgesOf (z.col.msgs, 2).empty() && edgesOf (z.col.msgs, 3).empty(), "Sustain 0%: no Gate S, no Gate R");
+            expect (edgesOf (z.col.msgs, kTrigIndex).size() == 4, "Sustain 0%: two triggers (A, D): " + showEdges (edgesOf (z.col.msgs, kTrigIndex)));
+        }
+        // 4. Back-to-back restart from the sustain: Gate S ends, Gate A starts, a trigger, at that sample.
+        {
+            Run r;
+            r.go (sr, basic (0.01, 0.05, 0.5, 0.05, 1.0), { on (1000, 60), off (20000, 60), on (20000, 62), off (40000, 62) }, 50000);
+            const auto ga = edgesOf (r.col.msgs, 0), gs = edgesOf (r.col.msgs, 2), gr = edgesOf (r.col.msgs, 3);
+            bool sOff = false, aOn = false;
+            for (auto& x : gs) if (! x.on && x.at == 20000) sOff = true;
+            for (auto& x : ga) if (x.on && x.at == 20000) aOn = true;
+            expect (sOff && aOn && gr.size() == 2 && gr[0].at == 40000, "back-to-back: Gate S off, Gate A on at that sample; no Gate R in between");
+        }
+        // 5. Note and Both: same timing; Note sends no CC; velocity 100; channel kept.
+        for (int mode : { (int) sendAsNote, (int) sendAsBoth })
+        {
+            Run r;
+            Settings st = withSendAs (basic (0.05, 0.1, 0.5, 0.2, 1.0), mode);
+            st.outChannel = 9;
+            r.go (sr, st, { on (1000), off (30000) }, 50000);
+            bool ok = true;
+            for (int k = 0; k < kNumPulseOutputs; ++k)
+            {
+                const auto e = edgesOf (r.col.msgs, k);
+                const auto want = expectedPulses (r.tr, k, len);
+                std::vector<std::pair<long long, bool>> notes, ccs;
+                for (auto& x : e) (x.note ? notes : ccs).push_back ({ x.at, x.on });
+                ok = ok && notes == want && (mode == sendAsBoth ? ccs == want : ccs.empty());
+                for (auto& x : e) ok = ok && x.ch == 9;
+            }
+            int vel = 0;
+            for (auto& m : r.col.msgs) if (m.note && m.val > 0) vel = m.val;
+            expect (ok && vel == 100, std::string (mode == sendAsNote ? "Note" : "Both") + ": notes 40-44 (and CC in Both) at the same samples, channel 9, velocity 100");
+        }
+        // 6. Changes while Gate S is on, in Both mode: each ends it at once and never starts a note.
+        struct Ch { const char* name; std::function<void (Settings&)> change; int expectCh; };
+        const std::vector<Ch> cases {
+            { "Send as changed", [] (Settings& s) { s.sendAs = sendAsCc; }, 16 },
+            { "channel changed", [] (Settings& s) { s.outChannel = 3; }, 16 },
+            { "Gate S switched off", [] (Settings& s) { s.pulseOn[2] = false; }, 16 },
+        };
+        for (const auto& c : cases)
+        {
+            Run r;
+            r.onBlock = [&c] (Engine& e, long long pos) { if (pos == 20480) { auto s = e.settings(); c.change (s); e.setSettings (s); } };
+            r.go (sr, withSendAs (basic (0.01, 0.05, 0.5, 0.05, 1.0), sendAsBoth), { on (1000), off (40000) }, 50000);
+            const auto gs = edgesOf (r.col.msgs, 2);
+            int offsAt = 0, onsAfter = 0;
+            for (auto& x : gs) { if (! x.on && x.at == 20480 && x.ch == c.expectCh) ++offsAt; if (x.on && x.at > 20480) ++onsAfter; }
+            int startedByChange = 0;
+            for (auto& m : r.col.msgs) if (m.at == 20480 && ((m.note && m.val > 0) || (! m.note && m.num >= 85 && m.num <= 89 && m.val == 127))) ++startedByChange;
+            expect (offsAt == 2 && onsAfter == 0 && startedByChange == 0, std::string (c.name) + " while Gate S is on: CC 0 and note-off at once (old channel), nothing started: " + showEdges (gs));
+            // Afterwards the next stage works normally (Gate R at the release), except for a switched-off output.
+            const auto gr = edgesOf (r.col.msgs, 3);
+            expect (gr.size() >= 1 && gr[0].on && gr[0].at == 40000, std::string (c.name) + ": Gate R follows at the release");
+        }
+        // 7. Rest (stop / reset / bypass), and prepare: everything on is ended at the first sample.
+        {
+            Run r;
+            r.onBlock = [] (Engine& e, long long pos) { if (pos == 20480) e.panic(); };
+            r.go (sr, withSendAs (basic (0.01, 0.05, 0.5, 0.05, 1.0), sendAsBoth), { on (1000), off (40000) }, 50000);
+            const auto gs = edgesOf (r.col.msgs, 2);
+            expect (gs.size() == 4 && ! gs[2].on && ! gs[3].on && gs[2].at == 20480 && gs[3].at == 20480, "stop while Gate S is on: CC 0 and note-off at once: " + showEdges (gs));
+            int later = 0;
+            for (auto& m : r.col.msgs) if (m.at > 20480) ++later;
+            expect (later == 0, "after the stop, the key's release sends nothing");
+        }
+        {
+            Engine e; e.prepare (sr); e.setSettings (withSendAs (basic (0.01, 0.05, 0.5, 0.05, 1.0), sendAsNote));
+            Collector col;
+            InputEvent onEv { 0, InputEvent::noteOn, 0, 60 };
+            e.render (512, &onEv, 1, false, col);
+            for (int k = 0; k < 20; ++k) e.render (512, nullptr, 0, false, col);
+            e.panic();
+            col.msgs.clear();
+            e.flushOnly (512, col);
+            int offs = 0;
+            for (auto& m : col.msgs) if (m.note && m.num == kPulseNote[2] && m.val == 0) ++offs;
+            expect (offs == 1 && ! e.pulses().anyOn(), "bypass while Gate S is on (Note): note-off at once");
+            for (int k = 0; k < 20; ++k) e.render (512, &onEv, k == 0 ? 1 : 0, false, col);
+            expect (e.pulses().isOn (2), "playing again: Gate S on");
+            col.msgs.clear();
+            e.prepare (44100.0);
+            e.render (256, nullptr, 0, false, col);
+            offs = 0;
+            for (auto& m : col.msgs) if (m.note && m.num == kPulseNote[2] && m.val == 0 && m.at == 0) ++offs;
+            expect (offs == 1 && ! e.pulses().anyOn(), "prepare (new sample rate) while Gate S is on: note-off at the next block's first sample");
+        }
+        // 8. Every block size and random settings: the gates follow the stated rules exactly (worked out from the
+        //    envelope's own trace), and the pulse lengths are never under 20 ms.
+        long long sessionsEdges = 0;
+        for (double rate : { 44100.0, 48000.0, 96000.0 })
+            for (int session = 0; session < 4; ++session)
+            {
+                std::mt19937 rng ((unsigned) (rate * 3 + session));
+                Run r;
+                r.blockSize = [&rng] { return 1 + (int) (rng() % 1024); };
+                Settings st = basic (0.003 + (rng() % 100) / 1000.0, 0.003 + (rng() % 100) / 1000.0, (rng() % 5) / 4.0,
+                                     0.003 + (rng() % 100) / 1000.0, 1.0, rng() % 2 == 0);
+                st.sendAs = (int) (rng() % 3);
+                std::vector<Ev> ev;
+                long long t = 500;
+                const long long total = (long long) (rate * 30);
+                while (t < total - (long long) rate)
+                {
+                    const long long l = (long long) (rng() % (unsigned) (rate * 0.3));
+                    const int note = 50 + (int) (rng() % 10);
+                    ev.push_back (on (t, note)); ev.push_back (off (t + l, note));
+                    t += (long long) (rng() % (unsigned) (rate * 0.25));
+                }
+                r.go (rate, st, ev, total);
+                const long long plen = N (0.02, rate);
+                bool same = true, longEnough = true;
+                for (int k = 0; k < kNumPulseOutputs; ++k)
+                {
+                    const auto e = edgesOf (r.col.msgs, k);
+                    std::vector<std::pair<long long, bool>> got;
+                    for (auto& x : e) if (x.note == (st.sendAs == sendAsNote)) got.push_back ({ x.at, x.on });
+                    same = same && got == expectedPulses (r.tr, k, plen);
+                    for (size_t i = 1; i < got.size(); ++i) if (! got[i].second) longEnough = longEnough && got[i].first - got[i - 1].first >= plen;
+                    sessionsEdges += (long long) got.size();
+                }
+                const std::string tag = " (" + str (rate) + " Hz, session " + str ((long long) session) + ", " + (st.env.trigMode ? "Trig" : "Gate") + " mode)";
+                expect (same, "gates and Trig exactly as the rules say, random block sizes" + tag);
+                expect (longEnough, "no gate or trigger shorter than 20 ms" + tag);
+            }
+
+        // 9. Stuck-note fuzz: random notes, block sizes (0 and 1 too), settings (Send as, channel, switches, times,
+        //    modes), stops, bypass and prepare. Our notes never double up, CC alternates 127 / 0, and once everything is
+        //    released nothing is left on anywhere.
+        long long fuzzEvents = 0;
+        for (int round = 0; round < 6; ++round)
+        {
+            std::mt19937 rng ((unsigned) (9000 + round));
+            double rate = round % 3 == 0 ? 44100.0 : (round % 3 == 1 ? 48000.0 : 96000.0);
+            Engine e; e.prepare (rate);
+            Settings s = basic (0.003, 0.02, 0.5, 0.02, 1.0);
+            s.sendAs = sendAsBoth;
+            e.setSettings (s);
+            Collector col;
+            bool noteOn[17][128] {};
+            int ccVal[17][128];
+            for (auto& c : ccVal) for (auto& v : c) v = 0;
+            bool doubled = false, strayOff = false, ccRepeat = false;
+            auto audit = [&] {
+                for (auto& m : col.msgs)
+                {
+                    if (m.note)
+                    {
+                        if (m.val > 0) { doubled = doubled || noteOn[m.ch][m.num]; noteOn[m.ch][m.num] = true; }
+                        else           { strayOff = strayOff || ! noteOn[m.ch][m.num]; noteOn[m.ch][m.num] = false; }
+                    }
+                    else if (m.num >= 85 && m.num <= 89)
+                    {
+                        ccRepeat = ccRepeat || ccVal[m.ch][m.num] == m.val;
+                        ccVal[m.ch][m.num] = m.val;
+                    }
+                }
+                col.msgs.clear();
+            };
+            bool manual = false;
+            std::vector<InputEvent> buf;
+            for (int block = 0; block < 12000; ++block)
+            {
+                const int n = rng() % 50 == 0 ? (int) (rng() % 2) : 1 + (int) (rng() % 1024);
+                buf.clear();
+                const int count = (int) (rng() % 6);
+                std::vector<int> offs;
+                for (int k = 0; k < count; ++k) offs.push_back (n > 0 ? (int) (rng() % (unsigned) n) : 0);
+                std::sort (offs.begin(), offs.end());
+                for (int k = 0; k < count; ++k)
+                {
+                    const unsigned kind = rng() % 20;
+                    const int ch = (int) (rng() % 3), note = 58 + (int) (rng() % 6);
+                    if (kind == 0)      buf.push_back ({ offs[(size_t) k], InputEvent::allNotesOff, (std::uint8_t) ch, 0 });
+                    else if (kind < 10) buf.push_back ({ offs[(size_t) k], InputEvent::noteOn, (std::uint8_t) ch, (std::uint8_t) note });
+                    else                buf.push_back ({ offs[(size_t) k], InputEvent::noteOff, (std::uint8_t) ch, (std::uint8_t) note });
+                    ++fuzzEvents;
+                }
+                if (rng() % 200 == 0) manual = ! manual;
+                if (rng() % 500 == 0) e.panic();
+                if (rng() % 700 == 0) { rate = rng() % 2 ? 44100.0 : 96000.0; e.prepare (rate); }
+                if (rng() % 25 == 0)
+                {
+                    switch (rng() % 6)
+                    {
+                        case 0: s.sendAs = (int) (rng() % 3); break;
+                        case 1: s.outChannel = 1 + (int) (rng() % 16); break;
+                        case 2: s.pulseOn[rng() % kNumPulseOutputs] = rng() % 3 != 0; break;
+                        case 3: s.env.trigMode = ! s.env.trigMode; break;
+                        case 4: s.env.sustain = (rng() % 5) / 4.0; break;
+                        default: s.env.attack = 0.003 + (rng() % 40) / 1000.0; s.env.decay = 0.003 + (rng() % 40) / 1000.0; s.env.release = 0.003 + (rng() % 40) / 1000.0; break;
+                    }
+                    e.setSettings (s);
+                }
+                if (rng() % 300 == 0) { e.flushOnly (n, col); audit(); continue; }
+                e.render (n, buf.data(), (int) buf.size(), manual, col);
+                audit();
+            }
+            // Everything released (All Notes Off on every channel used), the button let go, then wait.
+            for (std::uint8_t ch = 0; ch < 3; ++ch) buf.push_back ({ 0, InputEvent::allNotesOff, ch, 0 });
+            e.render (512, buf.data(), (int) buf.size(), false, col);
+            audit();
+            for (int k = 0; k < 400; ++k) { e.render (512, nullptr, 0, false, col); audit(); }
+            bool anyNote = false, anyCc = false;
+            for (int ch = 0; ch <= 16; ++ch) for (int nt = 0; nt < 128; ++nt) { anyNote = anyNote || noteOn[ch][nt]; anyCc = anyCc || ccVal[ch][nt] != 0; }
+            const std::string tag = "pulse fuzz round " + str ((long long) round);
+            expect (! doubled && ! strayOff, tag + ": a gate note is never sent twice, never released twice");
+            expect (! ccRepeat, tag + ": gate CC always alternates 127 / 0");
+            expect (! anyNote && ! anyCc && ! e.pulses().anyOn(), tag + ": nothing left on, on any channel");
+        }
+        std::printf ("gates and Trig: %lld exact edges at 3 rates x 9 block sizes, %lld in random sessions; stuck-note fuzz %lld events, nothing hanging\n",
+                     pulseEdges, sessionsEdges, fuzzEvents);
     }
 }
 
@@ -814,6 +1122,7 @@ int main()
     testCcRules();
     testFuzz();
     testCpuAndRate();
+    testPulses();
     std::printf ("engine tests: %lld checks, %lld failed\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

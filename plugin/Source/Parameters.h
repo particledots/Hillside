@@ -2,7 +2,7 @@
 //
 // IMPORTANT: these ids, their order, ranges and menu lists were fixed in the first build (0.1.0) and must never
 // change. Saved projects and automation refer to them. Milestone 2's controls (the four stage gates, Trig and
-// Send as) are already here: stored, and shown dimmed on the panel, so nothing has to be added in between.
+// Send as) were already here in 0.1.0 (stored, shown dimmed) and are live from 0.2.0.
 // If something must be added one day, add it at the END with ParameterID version 2.
 
 #pragma once
@@ -22,7 +22,7 @@ namespace HsParams
     inline constexpr const char* outChannel = "outChannel";  // 1 .. 16
     inline constexpr const char* outEnvOn   = "outEnvOn";    // Envelope output on
     inline constexpr const char* outLinOn   = "outLinOn";    // Linear output on
-    // Milestone 2
+    // Milestone 2 (live from 0.2.0)
     extern const char* const gateOnIds[4];                   // gateAOn, gateDOn, gateSOn, gateROn
     inline constexpr const char* trigOn     = "trigOn";
     inline constexpr const char* sendAs     = "sendAs";      // CC / Note / Both

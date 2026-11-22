@@ -368,12 +368,52 @@ void LevelBar::paint (juce::Graphics& g)
     }
 }
 
+// ================================================================================================ pulse lights
+PulseLights::PulseLights (HillsideProcessor& p) : proc (p)
+{
+    setInterceptsMouseClicks (false, false);
+    for (int k = 0; k < hillside::kNumPulseOutputs; ++k)
+    {
+        seenStarts[k] = proc.getDisplay().pulseStarts[k].load();
+        shown[k] = proc.getDisplay().pulseOn[k].load();
+    }
+    startTimerHz (30);
+}
+
+void PulseLights::timerCallback()
+{
+    bool changed = false;
+    for (int k = 0; k < hillside::kNumPulseOutputs; ++k)
+    {
+        const unsigned st = proc.getDisplay().pulseStarts[k].load();
+        if (st != seenStarts[k]) { seenStarts[k] = st; hold[k] = 3; }
+        else if (hold[k] > 0) --hold[k];
+        const bool on = proc.getDisplay().pulseOn[k].load() || hold[k] > 0;
+        if (on != shown[k]) { shown[k] = on; changed = true; }
+    }
+    if (changed) repaint();
+    // The numbers beside the lights follow Send as (CC 85, E1, or both).
+    const int mode = juce::roundToInt (proc.getValueTreeState().getRawParameterValue (HsParams::sendAs)->load());
+    if (mode != sendAsShown)
+    {
+        sendAsShown = mode;
+        if (auto* parent = getParentComponent()) parent->repaint (618, 255, 72, 130);
+    }
+}
+
+void PulseLights::paint (juce::Graphics& g)
+{
+    for (int k = 0; k < hillside::kNumPulseOutputs; ++k)
+        drawLight (g, 10.0f, 10.0f + (float) (k * kRowStep), 5.0f, amber, shown[k] ? 1.0f : 0.0f);
+}
+
 // ================================================================================================ panel
 HillsidePanel::HillsidePanel (HillsideProcessor& p)
     : proc (p), envelopeView (p), gateButton (p),
       modeSwitch (*p.getValueTreeState().getParameter (HsParams::gateMode), HsParams::gateModeNames),
       envBar (p, hillside::outEnvelope, sage), linBar (p, hillside::outLinear, sageMid),
-      sendAs (*p.getValueTreeState().getParameter (HsParams::sendAs), HsParams::sendAsNames)
+      sendAs (*p.getValueTreeState().getParameter (HsParams::sendAs), HsParams::sendAsNames),
+      pulseLights (p)
 {
     setLookAndFeel (&lnf);
     auto& vts = proc.getValueTreeState();
@@ -410,7 +450,7 @@ HillsidePanel::HillsidePanel (HillsideProcessor& p)
     addAndMakeVisible (envBar);
     addAndMakeVisible (linBar);
 
-    // Milestone 2: stored and shown, dimmed; they do nothing yet.
+    // Milestone 2: the gate block (dimmed in 0.1.0, live from 0.2.0).
     for (int i = 0; i < 4; ++i)
     {
         addAndMakeVisible (gateOn[i]);
@@ -419,6 +459,7 @@ HillsidePanel::HillsidePanel (HillsideProcessor& p)
     addAndMakeVisible (trigOn);
     trigOnAtt = std::make_unique<ButtonAttachment> (vts, HsParams::trigOn, trigOn);
     addAndMakeVisible (sendAs);
+    addAndMakeVisible (pulseLights);
     if (! HillsideProcessor::milestone2Live)
         for (juce::Component* c : { (juce::Component*) &gateOn[0], (juce::Component*) &gateOn[1], (juce::Component*) &gateOn[2],
                                     (juce::Component*) &gateOn[3], (juce::Component*) &trigOn, (juce::Component*) &sendAs })
@@ -463,6 +504,7 @@ void HillsidePanel::resized()
     for (int i = 0; i < 4; ++i) gateOn[i].setBounds (498, 259 + 26 * i, 30, 20);
     trigOn.setBounds (498, 363, 30, 20);
     sendAs.setBounds (552, 400, 198, 22);
+    pulseLights.setBounds (PulseLights::kX, PulseLights::kY, 20, 20 + 4 * PulseLights::kRowStep);
 }
 
 void HillsidePanel::paint (juce::Graphics& g)
@@ -535,8 +577,17 @@ void HillsidePanel::paint (juce::Graphics& g)
         g.drawText (r.name, 534, r.y - 8, 80, 16, juce::Justification::centredLeft);
         g.setColour (dim.withAlpha (a));
         g.setFont (font (11.0f));
-        g.drawText (r.cc, 620, r.y - 8, 66, 16, juce::Justification::centredLeft);
-        if (! r.live) drawLight (g, 742.0f, (float) r.y, 5.0f, amber, 0.0f);
+        juce::String number (r.cc);
+        if (! r.live)
+        {   // a gate or Trig row: its number follows Send as
+            static const char* const noteNames[] = { "E1", "F1", "F#1", "G1", "G#1" };
+            const int k = (r.y - 269) / 26;
+            const int mode = juce::roundToInt (proc.getValueTreeState().getRawParameterValue (HsParams::sendAs)->load());
+            if (mode == hillside::sendAsNote)      number = juce::String ("note ") + noteNames[k];
+            else if (mode == hillside::sendAsBoth) number = juce::String (r.cc) + " + " + noteNames[k];
+        }
+        g.drawText (number, 620, r.y - 8, 66, 16, juce::Justification::centredLeft);
+        if (! r.live && ! HillsideProcessor::milestone2Live) drawLight (g, 742.0f, (float) r.y, 5.0f, amber, 0.0f);
     }
     g.setColour (dim.withAlpha (HillsideProcessor::milestone2Live ? 1.0f : kDimAlpha));
     g.drawText ("Send as", 500, 404, 50, 14, juce::Justification::centredLeft);

@@ -1,11 +1,14 @@
 #include "hillside/Engine.h"
 
+#include <utility>
+
 namespace hillside
 {
     Engine::Engine()
     {
         cc.setLane (outEnvelope, kEnvelopeCoarseCc, kEnvelopeFineCc);
         cc.setLane (outLinear,   kLinearCoarseCc,   kLinearFineCc);
+        queue.items.reserve (4096);
         prepare (48000.0);
     }
 
@@ -14,6 +17,9 @@ namespace hillside
         env.prepare (sampleRate);
         env.setSettings (active.env);
         cc.prepare (sampleRate);
+        pulse.prepare (sampleRate);
+        pulsesToClose = pulse.anyOn();   // a gate note left on is ended at the start of the next block
+        lastRun = env.runs();
         keys.clear();
         abs = 0;
         gateNow = false;
@@ -27,10 +33,25 @@ namespace hillside
         pending = s;
         if (pending.outChannel < 1) pending.outChannel = 1;
         if (pending.outChannel > 16) pending.outChannel = 16;
+        if (pending.sendAs < sendAsCc || pending.sendAs > sendAsBoth) pending.sendAs = sendAsCc;
         settingsChanged = true;
     }
 
     void Engine::panic() { panicPending = true; }
+
+    void Engine::Queue::handOn (MidiSink& sink)
+    {
+        // Stable insertion sort by sample (the list is short and nearly in order already).
+        for (std::size_t a = 1; a < items.size(); ++a)
+            for (std::size_t b = a; b > 0 && items[b].offset < items[b - 1].offset; --b)
+                std::swap (items[b], items[b - 1]);
+        for (const auto& it : items)
+        {
+            if (it.note) sink.note (it.offset, it.channel, it.number, it.value);
+            else         sink.cc (it.offset, it.channel, it.number, it.value);
+        }
+        items.clear();
+    }
 
     void Engine::applySettings (MidiSink& sink)
     {
@@ -40,39 +61,41 @@ namespace hillside
         for (int i = 0; i < kNumSmoothOutputs; ++i)
             if (pending.outOn[i] != cc.isEnabled (i))
                 cc.setEnabled (i, pending.outOn[i], abs, 0);
+        pulse.configure (pending.pulseOn, pending.outChannel, pending.sendAs, 0, sink);
         active = pending;
         env.setSettings (active.env);
     }
 
+    void Engine::restNow (bool manualGate, MidiSink& sink)
+    {
+        panicPending = false;
+        env.reset();
+        keys.clear();
+        gateNow = false;
+        manualBlocked = manualGate;   // a button held through a stop must be let go and pressed again
+        pulse.closeAll (0, sink);
+        lastRun = env.runs();
+        for (int i = 0; i < kNumSmoothOutputs; ++i) cc.force (i, abs, 0, 0);
+    }
+
     void Engine::flushOnly (int numSamples, MidiSink& sink)
     {
-        if (settingsChanged) applySettings (sink);
-        if (panicPending)
-        {
-            panicPending = false;
-            env.reset();
-            keys.clear();
-            gateNow = false;
-            manualBlocked = manualHeld;
-            for (int i = 0; i < kNumSmoothOutputs; ++i) cc.force (i, abs, 0, 0);
-        }
-        cc.flush (active.outChannel, sink);
+        queue.items.clear();
+        if (pulsesToClose) { pulse.closeAll (0, queue); pulsesToClose = false; }
+        if (settingsChanged) applySettings (queue);
+        if (panicPending) restNow (manualHeld, queue);
+        cc.flush (active.outChannel, queue);
+        queue.handOn (sink);
         if (numSamples > 0) abs += numSamples;
     }
 
     void Engine::render (int numSamples, const InputEvent* events, int numEvents, bool manualGate, MidiSink& sink)
     {
-        if (settingsChanged) applySettings (sink);
+        queue.items.clear();
+        if (pulsesToClose) { pulse.closeAll (0, queue); pulsesToClose = false; }
+        if (settingsChanged) applySettings (queue);
         manualHeld = manualGate;
-        if (panicPending)
-        {
-            panicPending = false;
-            env.reset();
-            keys.clear();
-            gateNow = false;
-            manualBlocked = manualGate;   // a button held through a stop must be let go and pressed again
-            for (int i = 0; i < kNumSmoothOutputs; ++i) cc.force (i, abs, 0, 0);
-        }
+        if (panicPending) restNow (manualGate, queue);
         if (! manualGate) manualBlocked = false;
         const bool manual = manualGate && ! manualBlocked;
 
@@ -93,7 +116,8 @@ namespace hillside
                 else if (! want && gateNow)  env.gateFall();
                 gateNow = want;
             }
-            cc.flush (active.outChannel, sink);
+            cc.flush (active.outChannel, queue);
+            queue.handOn (sink);
             return;
         }
 
@@ -125,11 +149,15 @@ namespace hillside
             gateNow = want;
 
             const EnvSample s = env.next();
+            const bool started = s.run != lastRun;
+            lastRun = s.run;
+            pulse.step (abs, i, s.stage, started, queue);
             cc.consider (outEnvelope, abs, i, toFourteenBit (s.shaped), s.corner);
             cc.consider (outLinear,   abs, i, toFourteenBit (s.linear), s.corner);
-            if (trace != nullptr) trace->push_back ({ (float) s.linear, (float) s.shaped, s.stage, gateNow, s.corner });
+            if (trace != nullptr) trace->push_back ({ (float) s.linear, (float) s.shaped, s.stage, gateNow, s.corner, started });
             ++abs;
         }
-        cc.flush (active.outChannel, sink);
+        cc.flush (active.outChannel, queue);
+        queue.handOn (sink);
     }
 }

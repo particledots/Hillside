@@ -100,6 +100,11 @@ void HillsideProcessor::publish()
     display.stage.store ((int) env.stage());
     display.gate.store (engine.gate());
     for (int i = 0; i < hillside::kNumSmoothOutputs; ++i) display.sent[i].store (engine.ccStream().lastSent (i));
+    for (int k = 0; k < hillside::kNumPulseOutputs; ++k)
+    {
+        display.pulseOn[k].store (engine.pulses().isOn (k));
+        display.pulseStarts[k].store (engine.pulses().starts (k));
+    }
     display.blocks.fetch_add (1);
 }
 

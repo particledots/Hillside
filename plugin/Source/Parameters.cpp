@@ -63,7 +63,7 @@ Layout createLayout()
     l.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { outChannel, 1 }, "MIDI out channel", 1, 16, hillside::kDefaultChannel));
     addBool    (l, outEnvOn, "Envelope out", true);
     addBool    (l, outLinOn, "Linear out", true);
-    // Milestone 2
+    // Milestone 2 (live from 0.2.0)
     const char* gateNames[4] = { "Gate A out", "Gate D out", "Gate S out", "Gate R out" };
     for (int i = 0; i < 4; ++i) addBool (l, gateOnIds[i], gateNames[i], true);
     addBool    (l, trigOn, "Trig out", true);
@@ -84,6 +84,9 @@ hillside::Settings read (const juce::AudioProcessorValueTreeState& apvts)
     s.outChannel   = juce::jlimit (1, 16, juce::roundToInt (v (outChannel)));
     s.outOn[hillside::outEnvelope] = v (outEnvOn) >= 0.5f;
     s.outOn[hillside::outLinear]   = v (outLinOn) >= 0.5f;
+    for (int i = 0; i < 4; ++i) s.pulseOn[i] = v (gateOnIds[i]) >= 0.5f;
+    s.pulseOn[hillside::kTrigIndex] = v (trigOn) >= 0.5f;
+    s.sendAs = juce::jlimit (0, 2, juce::roundToInt (v (sendAs)));
     return s;
 }
 }

@@ -25,5 +25,16 @@ namespace hillside
     inline constexpr int kGateNote[4] = { 40, 41, 42, 43 };  // E1, F1, F#1, G1
     inline constexpr int kTrigNote   = 44;                   // G#1
 
+    // The five pulse outputs in one list: Gate A, Gate D, Gate S, Gate R, Trig.
+    inline constexpr int kNumPulseOutputs = 5;
+    inline constexpr int kTrigIndex = 4;
+    inline constexpr int kPulseCc[kNumPulseOutputs]   = { 85, 86, 87, 88, 89 };
+    inline constexpr int kPulseNote[kNumPulseOutputs] = { 40, 41, 42, 43, 44 };
+    inline constexpr int kPulseVelocity = 100;
+    inline constexpr double kPulseSeconds = 0.020;   // the trigger's length, and the shortest gate
+
+    // "Send as" (the control's menu order): CC, Note, Both.
+    enum SendAs { sendAsCc = 0, sendAsNote = 1, sendAsBoth = 2 };
+
     inline constexpr int kDefaultChannel = 16;
 }

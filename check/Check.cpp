@@ -1,22 +1,25 @@
 // HillsideCheck: runs the plugin layer without a host. The build workflow runs it on every push and fails if any
 // check fails.
 //
-//   1. The control list is exactly what 0.1.0 shipped (ids, order, ranges, defaults, menu lists): golden file
-//      layout-<version>.txt for every version that shipped one.
+//   1. The control list is exactly what 0.1.0 and 0.2.0 shipped (ids, order, ranges, defaults, menu lists): golden
+//      file layout-<version>.txt for every version that shipped one.
 //   2. Projects saved by every earlier version (golden saved states, every control away from its default) load
 //      unchanged; the Gate button never opens held.
 //   3. It is a MIDI effect: no audio buses, MIDI in and out, no latency, no tail, 16 controls.
 //   4. The MIDI path: everything passes unchanged and in order (notes keep channel, velocity and sample); the envelope
-//      goes out on channel 16 as CC 3 / 35 and CC 9 / 41; rest sent at the start; the top reached exactly.
+//      goes out on channel 16 as CC 3 / 35 and CC 9 / 41, the gates and Trig as CC 85-89, notes 40-44 or both;
+//      rest sent at the start; the top reached exactly.
 //   5. Automation: every control moved through its range, with and without a held note: never more than one value
-//      per output per block, never a note, nothing at all from controls that do not change the output.
+//      per output per block, no bursts from the gates, and changing a control never starts a note or a gate.
 //   6. Transport stop, reset / releaseResources / prepareToPlay, All Notes Off, bypass and a long pause in Logic's
-//      calls while a note is held: the envelope goes to rest, 0 is sent, and the key's later release does nothing.
-//   7. Stuck-gate fuzz through the real plugin: random notes, controllers, block sizes (including 0 and 1), control
-//      changes, stops, resets and bypass. After every key is released: at rest, 0 last sent on every channel used.
+//      calls while a note is held (gates sent as CC and as notes): the envelope goes to rest, 0 and note-offs are
+//      sent at once, and the key's later release does nothing.
+//   7. Stuck-gate and stuck-note fuzz through the real plugin: random notes, controllers, block sizes (including 0 and
+//      1), control changes (Send as, channel and switches too), stops, resets and bypass. After every key is
+//      released: at rest, 0 last sent on every channel used, no gate note left on.
 //   8. The panel: opens at its design size, draws, resizes between 80% and 200% with locked proportions, every
-//      control inside the window, each control moves only its own parameter, the Gate button plays the envelope,
-//      milestone 2's controls are dimmed and disabled. --snapshot <folder> writes pictures of it.
+//      control inside the window, live, and moving only its own parameter, the Gate button plays the envelope, the
+//      gate lights follow the outputs. --snapshot <folder> writes pictures of it.
 
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
@@ -43,7 +46,7 @@ static int checks = 0, failures = 0;
     } while (0)
 
 static constexpr int kNumControls = 16;
-static const char* const kVersions[] = { "0.1.0" };   // every version that shipped a golden list and state
+static const char* const kVersions[] = { "0.1.0", "0.2.0" };   // every version that shipped a golden list and state
 
 static std::vector<juce::RangedAudioParameter*> allParams (HillsideProcessor& proc)
 {
@@ -113,6 +116,38 @@ struct Receiver
         if (n == 35 || n == 41) value[ch][n] = coarse[ch][n - 32] * 128 + m.getControllerValue();
     }
     void take (const std::vector<Out>& v) { for (auto& o : v) take (o.m); }
+};
+
+// The gates and Trig as a receiver sees them, per channel: CC 85-89 values and notes 40-44 on or off. Notes from
+// elsewhere (the player's) are not counted: the checks play other note numbers.
+struct PulseWatch
+{
+    int ccVal[17][128] {};
+    bool noteOn[17][128] {};
+    int doubled = 0, strayOff = 0, ccRepeat = 0, starts = 0;
+    void take (const juce::MidiMessage& m)
+    {
+        const int ch = m.getChannel();
+        if (m.isController() && m.getControllerNumber() >= 85 && m.getControllerNumber() <= 89)
+        {
+            const int n = m.getControllerNumber(), v = m.getControllerValue();
+            ccRepeat += ccVal[ch][n] == v ? 1 : 0;
+            starts += v == 127 ? 1 : 0;
+            ccVal[ch][n] = v;
+        }
+        if (m.isNoteOnOrOff() && m.getNoteNumber() >= 40 && m.getNoteNumber() <= 44)
+        {
+            const int n = m.getNoteNumber();
+            if (m.isNoteOn()) { doubled += noteOn[ch][n] ? 1 : 0; noteOn[ch][n] = true; ++starts; }
+            else              { strayOff += noteOn[ch][n] ? 0 : 1; noteOn[ch][n] = false; }
+        }
+    }
+    void take (const std::vector<Out>& v) { for (auto& o : v) take (o.m); }
+    bool anythingOn() const
+    {
+        for (int ch = 0; ch <= 16; ++ch) for (int n = 0; n < 128; ++n) if (ccVal[ch][n] != 0 || noteOn[ch][n]) return true;
+        return false;
+    }
 };
 
 static void prepare (HillsideProcessor& proc, double sr = 48000.0, int block = 512)
@@ -340,6 +375,47 @@ static void testMidiPath()
     CHECK (only7 && rx2.value[7][35] > 0, "MIDI out channel 7: the envelope goes out on channel 7");
     run (proc, one (juce::MidiMessage::noteOff (1, 60)), 512);
     runEmpty (proc, 200);
+
+    // The gates and Trig (0.2.0), default Send as CC: Gate A on with the note, at its sample, on the out channel.
+    {
+        HillsideProcessor p2;
+        prepare (p2);
+        runEmpty (p2, 2);
+        auto o = run (p2, one (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 100), 512);
+        bool gateA = false, trig = false, notes = false;
+        for (auto& x : o)
+        {
+            if (x.m.isController() && x.m.getControllerNumber() == 85 && x.m.getControllerValue() == 127 && x.pos == 100 && x.m.getChannel() == 16) gateA = true;
+            if (x.m.isController() && x.m.getControllerNumber() == 89 && x.m.getControllerValue() == 127 && x.pos == 100) trig = true;
+            if (x.m.isNoteOnOrOff() && x.m.getNoteNumber() != 60) notes = true;
+        }
+        CHECK (gateA && trig && ! notes, "Send as CC (default): Gate A and Trig CC 127 at the note's sample, channel 16, no notes");
+        run (p2, one (juce::MidiMessage::noteOff (1, 60)), 512);
+        runEmpty (p2, 100);
+    }
+    for (int mode : { 1, 2 })
+    {
+        HillsideProcessor p2;
+        prepare (p2);
+        runEmpty (p2, 2);
+        setReal (p2, HsParams::sendAs, (float) mode);
+        PulseWatch w;
+        int ccs = 0;
+        auto o = run (p2, one (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 90), 100), 512);
+        w.take (o);
+        bool noteAt = false, playedPassed = false;
+        for (auto& x : o)
+        {
+            if (x.m.isNoteOn() && x.m.getNoteNumber() == 40 && x.m.getVelocity() == 100 && x.pos == 100 && x.m.getChannel() == 16) noteAt = true;
+            if (x.m.isNoteOn() && x.m.getNoteNumber() == 60 && x.m.getVelocity() == 90 && x.m.getChannel() == 1 && x.pos == 100) playedPassed = true;
+        }
+        for (int i = 0; i < 40; ++i) for (auto& x : run (p2, {}, 512)) { w.take (x.m); ccs += x.m.isController() && x.m.getControllerNumber() >= 85 && x.m.getControllerNumber() <= 89 ? 1 : 0; }
+        w.take (run (p2, one (juce::MidiMessage::noteOff (1, 60)), 512));
+        for (int i = 0; i < 100; ++i) w.take (run (p2, {}, 512));
+        CHECK (noteAt && playedPassed, "Send as %s: gate note E1 (40) at the note's sample, velocity 100, channel 16; the played note passes unchanged", mode == 1 ? "Note" : "Both");
+        CHECK ((mode == 1) == (ccs == 0 && w.ccVal[16][85] == 0), "Send as %s: %s", mode == 1 ? "Note" : "Both", mode == 1 ? "no gate CC" : "gate CC too");
+        CHECK (! w.anythingOn() && w.doubled == 0 && w.strayOff == 0 && w.starts >= 7, "Send as %s: every gate note released, none doubled (%d starts)", mode == 1 ? "Note" : "Both", w.starts);
+    }
 }
 
 // ------------------------------------------------------------------------------------------------ 5. automation
@@ -371,30 +447,66 @@ static void testAutomation()
     CHECK (notes == 0 && nonZero == 0, "moving controls with no note held: only rest values (%d notes, %d others)", notes, nonZero);
 
     // A note held: automate everything hard. Never more than one value per output per block (two pairs if the
-    // channel changes in that block: 0 on the old one), never a note.
+    // channel changes in that block: 0 on the old one); the gates (which follow the stages the times now give) never
+    // more than one on and one off per output per block, never a doubled note.
+    PulseWatch watch;
     run (proc, one (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100)), 512);
     std::mt19937 rng (42);
+    int burst = 0;
     for (int k = 0; k < 3000; ++k)
     {
         auto* p = params[rng() % params.size()];
         if (p->paramID == HsParams::manualGate) continue;
         p->setValueNotifyingHost ((float) (rng() % 1001) / 1000.0f);
         const auto out = run (proc, {}, 64 + (int) (rng() % 512));
-        std::map<int, int> perChannelFine;
+        watch.take (out);
+        std::map<int, int> perChannelFine, perPulse;
         for (auto& o : out)
         {
-            notes += o.m.isNoteOnOrOff() ? 1 : 0;
             if (o.m.isController() && (o.m.getControllerNumber() == 35 || o.m.getControllerNumber() == 41))
                 ++perChannelFine[o.m.getChannel() * 128 + o.m.getControllerNumber()];
+            if (o.m.isController() && o.m.getControllerNumber() >= 85 && o.m.getControllerNumber() <= 89) ++perPulse[o.m.getControllerNumber() - 85];
+            if (o.m.isNoteOnOrOff() && o.m.getNoteNumber() >= 40 && o.m.getNoteNumber() <= 44) ++perPulse[o.m.getNoteNumber() - 40];
+            notes += o.m.isNoteOnOrOff() && (o.m.getNoteNumber() < 40 || o.m.getNoteNumber() > 44) ? 1 : 0;
         }
         for (auto& [key, count] : perChannelFine) bad += count > 1 ? 1 : 0;
+        for (auto& [key, count] : perPulse) burst += count > 4 ? 1 : 0;
     }
-    CHECK (notes == 0, "automation while held sends no notes (%d)", notes);
+    CHECK (notes == 0, "automation while held sends no other notes (%d)", notes);
     CHECK (bad == 0, "automation while held: never more than one value per output per block (%d blocks over)", bad);
+    CHECK (burst == 0 && watch.doubled == 0 && watch.strayOff == 0, "automation while held: no gate bursts (%d), no doubled or stray gate notes (%d, %d)", burst, watch.doubled, watch.strayOff);
     for (auto* p : params) p->setValueNotifyingHost (p->getDefaultValue());
-    run (proc, one (juce::MidiMessage::noteOff (1, 60)), 512);
-    runEmpty (proc, 300);
+    watch.take (run (proc, one (juce::MidiMessage::noteOff (1, 60)), 512));
+    for (int i = 0; i < 300; ++i) watch.take (run (proc, {}, 512));
     CHECK (proc.getDisplay().stage.load() == 0 && ! proc.getDisplay().gate.load(), "after automation and release: at rest");
+    CHECK (! watch.anythingOn(), "after automation and release: no gate left on, on any channel");
+
+    // Sustaining, gates sent as both: Send as, the channel, the gate switches and the envelope switches changed over
+    // and over. These only ever end a gate; none of them starts one.
+    {
+        HillsideProcessor p2;
+        prepare (p2);
+        setReal (p2, HsParams::sendAs, 2.0f);
+        runEmpty (p2, 2);
+        PulseWatch w;
+        w.take (run (p2, one (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100)), 512));
+        for (int i = 0; i < 60; ++i) w.take (run (p2, {}, 512));
+        const int startsBefore = w.starts;
+        CHECK (w.noteOn[16][42] && w.ccVal[16][87] == 127, "sustaining: Gate S on as a note and as CC");
+        std::mt19937 r2 (7);
+        const char* changeable[] = { HsParams::sendAs, HsParams::outChannel, HsParams::gateOnIds[0], HsParams::gateOnIds[1],
+                                     HsParams::gateOnIds[2], HsParams::gateOnIds[3], HsParams::trigOn, HsParams::outEnvOn, HsParams::outLinOn };
+        for (int k = 0; k < 600; ++k)
+        {
+            P (p2, changeable[r2() % 9])->setValueNotifyingHost ((float) (r2() % 1001) / 1000.0f);
+            w.take (run (p2, {}, 32 + (int) (r2() % 600)));
+        }
+        CHECK (w.starts == startsBefore && w.doubled == 0 && w.strayOff == 0, "changing Send as, channel and switches while held never starts a gate or a note (%d new)", w.starts - startsBefore);
+        for (auto* p : allParams (p2)) p->setValueNotifyingHost (p->getDefaultValue());
+        w.take (run (p2, one (juce::MidiMessage::noteOff (1, 60)), 512));
+        for (int i = 0; i < 200; ++i) w.take (run (p2, {}, 512));
+        CHECK (! w.anythingOn(), "released: nothing left on");
+    }
 }
 
 // ------------------------------------------------------------------------------------------------ 6. stops
@@ -411,6 +523,7 @@ static void testStops()
         { "bypass", [] (HillsideProcessor&, FakePlayHead&, double&) {}, true },
         { "a 2 s pause in Logic's calls", [] (HillsideProcessor&, FakePlayHead&, double& t) { t += 2000.0; }, false },
     };
+    for (int mode : { 0, 2 })   // gates sent as CC, then as CC and notes
     for (const auto& c : cases)
     {
         HillsideProcessor proc;
@@ -420,12 +533,15 @@ static void testStops()
         double t = 0.0;
         proc.clock = [&t] { return t; };
         prepare (proc);
+        setReal (proc, HsParams::sendAs, (float) mode);
         Receiver rx;
-        auto step = [&] (juce::MidiBuffer m, bool bypassed = false) { t += 10.0; auto o = run (proc, m, 512, bypassed); rx.take (o); return o; };
+        PulseWatch w;
+        auto step = [&] (juce::MidiBuffer m, bool bypassed = false) { t += 10.0; auto o = run (proc, m, 512, bypassed); rx.take (o); w.take (o); return o; };
         step ({});
         step (one (juce::MidiMessage::noteOn (2, 64, (juce::uint8) 100)));
         for (int i = 0; i < 40; ++i) step ({});
         CHECK (proc.getDisplay().stage.load() == (int) hillside::Stage::sustain && rx.value[16][35] > 0, "%s: sustaining before", c.name);
+        CHECK (w.ccVal[16][87] == 127 && w.noteOn[16][42] == (mode == 2), "%s: Gate S on before (%s)", c.name, mode == 2 ? "CC and note" : "CC");
         c.stop (proc, ph, t);
         if (juce::String (c.name) == "All Notes Off")
         {
@@ -440,6 +556,11 @@ static void testStops()
             for (auto& m : o) if (m.m.isController() && (m.m.getControllerNumber() == 35 || m.m.getControllerNumber() == 41) && m.m.getControllerValue() == 0 && m.pos == 0) ++zeros;
             CHECK (proc.getDisplay().stage.load() == 0 && ! proc.getDisplay().gate.load(), "%s: at rest at once", c.name);
             CHECK (zeros == 2 && rx.value[16][35] == 0 && rx.value[16][41] == 0, "%s: 0 sent on both outputs at the first sample (%d)", c.name, zeros);
+            int gateEnds = 0;
+            for (auto& m : o)
+                if (m.pos == 0 && ((m.m.isController() && m.m.getControllerNumber() == 87 && m.m.getControllerValue() == 0) || (m.m.isNoteOff() && m.m.getNoteNumber() == 42)))
+                    ++gateEnds;
+            CHECK (gateEnds == (mode == 2 ? 2 : 1) && ! w.anythingOn(), "%s: Gate S ended at the first sample (%s)", c.name, mode == 2 ? "CC 0 and note-off" : "CC 0");
             if (c.bypass)
             {
                 int ours = 0;
@@ -461,6 +582,7 @@ static void testStops()
         step (one (juce::MidiMessage::noteOff (1, 60)));
         for (int i = 0; i < 100; ++i) step ({});
         CHECK (proc.getDisplay().stage.load() == 0 && rx.value[16][35] == 0, "%s: and ends at rest", c.name);
+        CHECK (! w.anythingOn() && w.doubled == 0 && w.strayOff == 0, "%s: no gate or gate note left on (%s)", c.name, mode == 2 ? "Both" : "CC");
         proc.setPlayHead (nullptr);
     }
 }
@@ -478,6 +600,7 @@ static void fuzz (unsigned seed, bool withBypass)
     std::mt19937 rng (seed);
     auto params = allParams (proc);
     Receiver rx;
+    PulseWatch w;
     bool down[17][128] {};
     long long events = 0;
     for (int block = 0; block < 18000; ++block)
@@ -505,7 +628,9 @@ static void fuzz (unsigned seed, bool withBypass)
         if (rng() % 200 == 0) ph.playing = ! ph.playing;
         if (rng() % 500 == 0) proc.reset();
         const bool bypassed = withBypass && (block / 300) % 4 == 3;
-        rx.take (run (proc, in, n, bypassed));
+        const auto o = run (proc, in, n, bypassed);
+        rx.take (o);
+        w.take (o);
     }
     // Release everything (and the Gate button), the outputs on, then wait.
     juce::MidiBuffer offs;
@@ -515,13 +640,14 @@ static void fuzz (unsigned seed, bool withBypass)
     setReal (proc, HsParams::outLinOn, 1.0f);
     for (const char* id : { HsParams::attack, HsParams::decay, HsParams::release }) setReal (proc, id, 50.0f);
     t += 10.0;
-    rx.take (run (proc, offs, 512));
-    for (int i = 0; i < 400; ++i) { t += 10.0; rx.take (run (proc, {}, 512)); }
+    { const auto o = run (proc, offs, 512); rx.take (o); w.take (o); }
+    for (int i = 0; i < 400; ++i) { t += 10.0; const auto o = run (proc, {}, 512); rx.take (o); w.take (o); }
     bool allZero = true;
     for (int ch = 1; ch <= 16; ++ch) allZero = allZero && rx.value[ch][35] <= 0 && rx.value[ch][41] <= 0;
     CHECK (proc.getDisplay().stage.load() == 0 && ! proc.getDisplay().gate.load(), "fuzz %u: at rest after every key is released", seed);
     CHECK (allZero, "fuzz %u: every channel's receiver at 0", seed);
-    std::printf ("stuck-gate fuzz%s: %lld random events in 18,000 blocks, nothing stuck\n", withBypass ? " with bypass" : "", events);
+    CHECK (! w.anythingOn() && w.doubled == 0 && w.strayOff == 0, "fuzz %u: no gate CC or gate note left on, none doubled (%d starts)", seed, w.starts);
+    std::printf ("stuck-gate and stuck-note fuzz%s: %lld random events in 18,000 blocks, %d gate starts, nothing stuck\n", withBypass ? " with bypass" : "", events, w.starts);
     proc.setPlayHead (nullptr);
 }
 
@@ -545,8 +671,7 @@ static void testPanel()
     for (auto& c : editor->panel.controls())
     {
         CHECK (juce::Rectangle<int> (0, 0, HillsidePanel::kWidth, HillsidePanel::kHeight).contains (c.control->getBounds()), "%s inside the panel", c.paramId.toRawUTF8());
-        CHECK (c.control->isEnabled() == c.live, "%s %s", c.paramId.toRawUTF8(), c.live ? "enabled" : "dimmed and disabled (milestone 2)");
-        if (! c.live) continue;
+        CHECK (c.live && c.control->isEnabled() && c.control->getAlpha() > 0.99f, "%s live (not dimmed)", c.paramId.toRawUTF8());
         std::vector<float> before;
         for (auto* p : params) before.push_back (p->getValue());
         if (auto* s = dynamic_cast<juce::Slider*> (c.control))            s->setValue (s->getMinimum() + (s->getMaximum() - s->getMinimum()) * 0.71, juce::sendNotificationSync);
@@ -569,6 +694,21 @@ static void testPanel()
     editor->panel.getGateButton().press (false);
     runEmpty (proc, 1);
     CHECK (proc.getDisplay().stage.load() == (int) hillside::Stage::release, "Gate button let go: release");
+    // The gate lights: Gate S lit while sustaining, Trig flashes at a stage start, dark when switched off.
+    run (proc, one (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100)), 512);
+    runEmpty (proc, 60);
+    auto& lights = editor->panel.getPulseLights();
+    for (int i = 0; i < 5; ++i) lights.refresh();
+    CHECK (lights.lit (2) && ! lights.lit (0) && ! lights.lit (1) && ! lights.lit (3), "sustaining: only the Gate S light is lit");
+    run (proc, one (juce::MidiMessage::noteOff (1, 60)), 512);
+    lights.refresh();
+    CHECK (lights.lit (3) && lights.lit (4), "release: Gate R lit, Trig flashes");
+    setReal (proc, HsParams::gateOnIds[3], 0.0f);
+    runEmpty (proc, 1);
+    for (int i = 0; i < 5; ++i) lights.refresh();
+    CHECK (! lights.lit (3), "Gate R switched off: its light goes dark");
+    setReal (proc, HsParams::gateOnIds[3], 1.0f);
+    runEmpty (proc, 200);
     editor->panel.getModeSwitch().choose (1);
     CHECK (juce::roundToInt (P (proc, HsParams::gateMode)->convertFrom0to1 (P (proc, HsParams::gateMode)->getValue())) == 1, "Gate | Trig switch sets Trig");
     editor->panel.getModeSwitch().choose (0);
@@ -631,6 +771,8 @@ static void writeSnapshots (const juce::File& dir)
         hold (p, 150);
     });
     shoot ("window-6-small-80.png", 624, [&] (HillsideProcessor& p) { hold (p, 10); });
+    shoot ("window-8-gates-note-sustain.png", 780, [&] (HillsideProcessor& p) { setReal (p, HsParams::sendAs, 1.0f); hold (p, 60); });
+    shoot ("window-9-gates-both-attack.png", 780, [&] (HillsideProcessor& p) { setReal (p, HsParams::sendAs, 2.0f); setReal (p, HsParams::attack, 3000.0f); setReal (p, HsParams::trigOn, 0.0f); hold (p, 20); });
     shoot ("window-7-large-200.png", 1560, [&] (HillsideProcessor& p) { hold (p, 10); });
 }
 

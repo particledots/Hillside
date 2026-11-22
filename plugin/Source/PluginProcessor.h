@@ -1,6 +1,7 @@
 // What Logic sees: a MIDI effect (AU type aumi) with no audio. Every incoming MIDI message passes through unchanged,
 // at its own sample, with no delay. The notes are also read: they open the envelope's gate. The envelope goes out as
-// 14-bit CC on the chosen channel (16 by default), added to the MIDI stream at the exact samples.
+// 14-bit CC on the chosen channel (16 by default), and the stage gates and Trig as CC and/or notes, added to the MIDI
+// stream at the exact samples.
 
 #pragma once
 
@@ -19,6 +20,8 @@ struct HillsideDisplay
     std::atomic<int> stage { 0 };                  // hillside::Stage
     std::atomic<bool> gate { false };
     std::atomic<int> sent[hillside::kNumSmoothOutputs] { { -1 }, { -1 } };   // the last 14-bit value each output sent
+    std::atomic<bool> pulseOn[hillside::kNumPulseOutputs] {};                 // Gate A, D, S, R, Trig: on now
+    std::atomic<unsigned> pulseStarts[hillside::kNumPulseOutputs] {};         // how many times each has come on
     std::atomic<unsigned> blocks { 0 };
 };
 
@@ -59,8 +62,8 @@ public:
     juce::AudioProcessorValueTreeState& getValueTreeState() { return apvts; }
     const HillsideDisplay& getDisplay() const { return display; }
 
-    // Milestone 2's outputs (stage gates, Trig, Send as) send nothing yet in 0.1.0; their controls are stored.
-    static constexpr bool milestone2Live = false;
+    // Milestone 2's outputs (stage gates, Trig, Send as): stored but silent in 0.1.0, live from 0.2.0.
+    static constexpr bool milestone2Live = true;
 
     // If Logic stops calling the plugin for this long and then calls again, the envelope is sent to rest first (a key
     // released while the plugin was not being run can never leave the gate held). Replaceable for the checks.

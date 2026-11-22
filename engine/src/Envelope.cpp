@@ -68,6 +68,7 @@ namespace hillside
         }
         if (s == Stage::release && startLin <= 0.0 && startShp <= 0.0)
             st = Stage::idle;   // nothing to release
+        if (st != Stage::idle) ++runCount;
         updateIncrement();
     }
 
@@ -135,7 +136,7 @@ namespace hillside
             case Stage::release: lin = startLin * (1.0 - p);            shp = startShp * (1.0 - curve (p)); break;
         }
 
-        const EnvSample out { lin, shp, st, corner };
+        const EnvSample out { lin, shp, st, corner, runCount };
         if (timed (st)) p += inc;
         return out;
     }

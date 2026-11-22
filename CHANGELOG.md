@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 (milestone 2: built and checked in CI; waiting for the Logic test on the Intel Mac)
+
+- The four stage gates and the combined trigger are live: Gate A, D, S, R (high for the whole stage, at least 20 ms)
+  and Trig (20 ms at the start of every stage that runs; closer triggers merge), sent as CC 85-89, notes 40-44
+  (E1 to G#1, velocity 100) or both, on the MIDI out channel, chosen by Send as (default CC). Engine: new `Pulses`.
+- Their switches and Send as are live on the panel (no longer dimmed, "milestone 2" tag gone); each output has a light;
+  the numbers beside them follow Send as.
+- Stuck-note safety: Send as, channel and switch changes, stop, reset, bypass, pauses and a new sample rate end every
+  gate and gate note at once; a control change never starts one.
+- Everything the engine sends in a block now goes out in sample order.
+- Control list unchanged (16 controls). Golden control list and saved state for 0.2.0 added; 0.1.0 projects load.
+- The mapper is unchanged; its test now feeds the Gate and Trig sources the engine's real gate stream.
+
 ## 0.1.0 (milestone 1 finished: tested in Logic on the M4 Mac mini and the Intel Mac, 2026-11-22)
 
 - Logic test result (Bryn, both Macs: M4 Mac mini, macOS Tahoe, Logic 11.2.2; Intel Mac, macOS 12.7.8, Logic 10.7.8):

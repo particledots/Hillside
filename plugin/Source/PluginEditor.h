@@ -2,8 +2,8 @@
 //   left:  the envelope display (the curve for the current settings, the linear one dashed, a moving point on the live
 //          envelope, the gate bar), the four stage lights A D S R, the four faders and the Shape knob;
 //   right: the Gate button (lights up with the envelope) and the Gate | Trig switch, the gate-in light, then the
-//          outputs: Envelope and Linear with their switches, CC numbers and level bars; the milestone 2 block (Gate A,
-//          D, S, R, Trig, Send as) shown dimmed and tagged;
+//          outputs: Envelope and Linear with their switches, CC numbers and level bars; the gate block (Gate A, D, S,
+//          R, Trig with their switches, numbers and lights, and Send as), live from 0.2.0 (dimmed and tagged in 0.1.0);
 //   top:   the name, the MIDI out channel and the version.
 // The panel is laid out at 780 x 470 and scaled to the window (80% to 200%, proportions locked).
 
@@ -105,6 +105,27 @@ private:
     int shownValue = -2;
 };
 
+// The lights of the five pulse outputs (Gate A, D, S, R, Trig): lit while that output is on. A trigger shorter than
+// the panel's refresh still flashes (each new start keeps the light on for about 100 ms).
+class PulseLights : public juce::Component, private juce::Timer
+{
+public:
+    explicit PulseLights (HillsideProcessor& p);
+    ~PulseLights() override { stopTimer(); }
+    void paint (juce::Graphics&) override;
+    static constexpr int kX = 732, kY = 259, kRowStep = 26;   // light centres at x 742, y 269 + 26 k on the panel
+    bool lit (int k) const { return shown[k]; }               // for the checks
+    void refresh() { timerCallback(); }                      // for the checks
+
+private:
+    void timerCallback() override;
+    HillsideProcessor& proc;
+    bool shown[hillside::kNumPulseOutputs] {};
+    unsigned seenStarts[hillside::kNumPulseOutputs] {};
+    int hold[hillside::kNumPulseOutputs] {};
+    int sendAsShown = -1;
+};
+
 // The whole panel at its design size (780 x 470). The editor below scales it to the window.
 class HillsidePanel : public juce::Component
 {
@@ -119,6 +140,7 @@ public:
     struct ControlInfo { juce::Component* control; juce::String paramId; bool live; };
     std::vector<ControlInfo> controls();
     GateButton& getGateButton() { return gateButton; }
+    PulseLights& getPulseLights() { return pulseLights; }
     Segmented& getModeSwitch() { return modeSwitch; }
 
     static constexpr int kWidth = 780, kHeight = 470;
@@ -139,8 +161,9 @@ private:
     juce::ComboBox channelBox;
     juce::ToggleButton envOn, linOn;
     LevelBar envBar, linBar;
-    juce::ToggleButton gateOn[4], trigOn;           // milestone 2 (dimmed)
-    Segmented sendAs;                               // milestone 2 (dimmed)
+    juce::ToggleButton gateOn[4], trigOn;           // milestone 2 (live from 0.2.0)
+    Segmented sendAs;                               // milestone 2 (live from 0.2.0)
+    PulseLights pulseLights;
 
     std::unique_ptr<SliderAttachment> faderAtt[4], shapeAtt;
     std::unique_ptr<ComboAttachment> channelAtt;

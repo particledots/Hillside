@@ -10,7 +10,7 @@ endif()
 
 # The version is the plugin's version in Logic. Raise it with every milestone: macOS and Logic cache a plugin's
 # details and only refresh them when the installed version goes up.
-project(Hillside VERSION 0.1.0 LANGUAGES C CXX)
+project(Hillside VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

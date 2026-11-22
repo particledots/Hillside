@@ -44,6 +44,7 @@ namespace hillside
         double linear, shaped;   // 0 .. 1
         Stage stage;
         bool corner;             // a stage reached its target at this sample (the top, the sustain level, or 0)
+        unsigned run;            // counts every stage that starts; a new number at this sample = a stage started here
     };
 
     class Envelope
@@ -60,6 +61,7 @@ namespace hillside
         EnvSample next();  // the values at this sample, then one sample on
 
         Stage stage() const      { return st; }
+        unsigned runs() const    { return runCount; }   // stages started so far (A, D, S, R; never rest)
         double progress() const  { return p; }   // 0 .. 1 through the current stage
         double linear() const    { return lin; }
         double shaped() const    { return shp; }
@@ -83,5 +85,6 @@ namespace hillside
         double lin = 0.0, shp = 0.0;             // the latest values
         double attackFraction = 1.0;             // the part of the full rise this attack has to cover (linear)
         bool gateHigh = false;
+        unsigned runCount = 0;
     };
 }

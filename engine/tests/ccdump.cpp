@@ -1,6 +1,7 @@
-// Prints the engine's real MIDI stream, for the mapper test: "sample channel cc value" per CC.
+// Prints the engine's real MIDI stream, for the mapper test: "sample channel cc value" per CC, and
+// "note sample channel number velocity" per note (the stage gates and Trig in Note or Both mode).
 // Plays a fixed pattern of notes (short, long, overlapping, back-to-back) with settings that change between phases.
-// Usage: hillside_ccdump [seconds] [out channel]
+// Usage: hillside_ccdump [seconds] [out channel] [send as: 0 CC, 1 Note, 2 Both]
 
 #include "hillside/Engine.h"
 
@@ -21,11 +22,13 @@ int main (int argc, char** argv)
 {
     const double seconds = argc > 1 ? std::atof (argv[1]) : 30.0;
     const int channel = argc > 2 ? std::atoi (argv[2]) : 16;
+    const int sendAs = argc > 3 ? std::atoi (argv[3]) : 0;
     const double sr = 48000.0;
     Engine e;
     e.prepare (sr);
     Settings s;
     s.outChannel = channel;
+    s.sendAs = sendAs;
     s.env.attack = 0.02; s.env.decay = 0.3; s.env.sustain = 0.4; s.env.release = 0.5; s.env.shape = 1.0;
     e.setSettings (s);
     Printer p;
@@ -63,5 +66,6 @@ int main (int argc, char** argv)
     for (int k = 0; k < 400; ++k) { p.blockStart = pos; e.render (512, nullptr, 0, false, p); pos += 512; }
     std::printf ("final 0 %d\n", e.ccStream().lastSent (outEnvelope));
     std::printf ("final 1 %d\n", e.ccStream().lastSent (outLinear));
+    std::printf ("pulses-on %d\n", e.pulses().anyOn() ? 1 : 0);
     return 0;
 }
