@@ -1,0 +1,292 @@
+name: Build Hillside
+
+# Runs automatically every time code is pushed, and can also be started by hand
+# from the Actions tab ("Run workflow").
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine-test:
+    name: Engine self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run the engine test
+        run: |
+          set +e
+          ( cmake -S . -B build-test -DHILLSIDE_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Release \
+            && cmake --build build-test -j 4 \
+            && ctest --test-dir build-test -R engine --output-on-failure -V ) > engine-test.log 2>&1
+          code=$?
+          tail -n 40 engine-test.log
+          # Result is also written as annotations (shown on the run page and readable through the API).
+          if [ $code -ne 0 ]; then
+            echo "::error::ENGINE-TEST: failed (exit code $code)"
+            grep -E "error|FAIL|engine tests:" engine-test.log | head -15 | while IFS= read -r line; do echo "::error::ENGINE-TEST: $line"; done
+            exit 1
+          fi
+          echo "::notice::ENGINE-TEST: $(grep -h 'engine tests:' engine-test.log | head -n 1)"
+          echo "::notice::TIMING: $(grep -h 'timing:' engine-test.log | head -n 1)"
+          echo "::notice::FUZZ: $(grep -h 'stuck-gate fuzz' engine-test.log | head -n 1)"
+          echo "::notice::CPU: $(grep -ho 'CPU: .*' engine-test.log | head -n 1)"
+          echo "::notice::MIDI: $(grep -ho 'MIDI: .*' engine-test.log | head -n 1)"
+
+  mapper-test:
+    name: Mapper test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the real mapper script on the engine's real MIDI stream
+        run: |
+          set +e
+          node --version
+          ( cmake -S . -B build-test -DHILLSIDE_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Release \
+            && cmake --build build-test --target hillside_ccdump -j 4 \
+            && ctest --test-dir build-test -R mapper --output-on-failure -V ) > mapper-test.log 2>&1
+          code=$?
+          tail -n 30 mapper-test.log
+          if [ $code -ne 0 ] || ! grep -q "mapper tests: .* checks passed" mapper-test.log; then
+            echo "::error::MAPPER-TEST: failed (exit code $code)"
+            grep -E "error|FAIL|mapper tests:" mapper-test.log | head -15 | while IFS= read -r line; do echo "::error::MAPPER-TEST: $line"; done
+            exit 1
+          fi
+          echo "::notice::MAPPER-TEST: $(grep -h 'mapper tests:' mapper-test.log | head -n 1)"
+
+  plugin-check:
+    name: Plugin-layer check (no host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run HillsideCheck
+        run: |
+          set +e
+          ( sudo apt-get update \
+            && sudo apt-get install -y libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev \
+                 libfreetype-dev libfontconfig1-dev libgl1-mesa-dev \
+            && cmake -S . -B build-check -DHILLSIDE_BUILD_PLUGIN=OFF -DHILLSIDE_BUILD_TESTS=OFF -DHILLSIDE_BUILD_CHECK=ON -DCMAKE_BUILD_TYPE=Release \
+            && cmake --build build-check --target HillsideCheck -j 4 \
+            && BIN=$(find build-check -type f -name HillsideCheck -perm -u+x | head -n 1) \
+            && echo "running $BIN" && "$BIN" ) > plugin-check.log 2>&1
+          code=$?
+          tail -n 30 plugin-check.log
+          if [ $code -ne 0 ]; then
+            echo "::error::PLUGIN-CHECK: failed (exit code $code)"
+            grep -E "error|FAIL|plugin checks:" plugin-check.log | head -15 | while IFS= read -r line; do echo "::error::PLUGIN-CHECK: $line"; done
+            exit 1
+          fi
+          echo "::notice::PLUGIN-CHECK: $(grep -h 'plugin checks:' plugin-check.log | head -n 1)"
+          grep -h 'stuck-gate fuzz' plugin-check.log | while IFS= read -r line; do echo "::notice::PLUGIN-CHECK: $line"; done
+          BIN=$(find build-check -type f -name HillsideCheck -perm -u+x | head -n 1)
+          "$BIN" --snapshot window-pictures > /dev/null 2>&1 || echo "::warning::PLUGIN-CHECK: could not draw the window pictures"
+
+      - name: Upload the window pictures
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hillside-window-pictures
+          path: window-pictures/*.png
+          if-no-files-found: warn
+
+  build-macos:
+    name: Build AU + VST3 (macOS)
+    runs-on: macos-26     # Apple silicon runner; macos-14 is retired by GitHub on 2 Nov 2026
+    permissions:
+      contents: write     # only to put the finished package into a private draft release (last step)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          set +e
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DHILLSIDE_BUILD_TESTS=OFF > configure.log 2>&1; code=$?
+          tail -n 20 configure.log
+          if [ $code -ne 0 ]; then
+            echo "::error::CONFIGURE: failed (exit code $code)"
+            grep -iE "error" configure.log | head -10 | while IFS= read -r line; do echo "::error::CONFIGURE: $line"; done
+            exit 1
+          fi
+
+      - name: Build AU and VST3
+        run: |
+          set +e
+          cmake --build build --config Release --target Hillside_AU Hillside_VST3 -j 4 > build.log 2>&1; code=$?
+          tail -n 30 build.log
+          if [ $code -ne 0 ]; then
+            echo "::error::BUILD: failed (exit code $code)"
+            grep -E "error:|Error " build.log | head -15 | while IFS= read -r line; do echo "::error::BUILD: $line"; done
+            exit 1
+          fi
+          echo "::notice::BUILD: AU and VST3 compiled"
+
+      - name: Locate the built plugins
+        id: find
+        run: |
+          AU=$(find build -type d -name "Hillside.component" | head -n 1)
+          VST3=$(find build -type d -name "Hillside.vst3" | head -n 1)
+          echo "AU:   $AU"
+          echo "VST3: $VST3"
+          test -n "$AU"   || { echo "AU bundle not found";   exit 1; }
+          test -n "$VST3" || { echo "VST3 bundle not found"; exit 1; }
+          echo "au=$AU"     >> "$GITHUB_OUTPUT"
+          echo "vst3=$VST3" >> "$GITHUB_OUTPUT"
+
+      - name: Check the build is universal (Apple Silicon + Intel)
+        run: |
+          lipo -archs "${{ steps.find.outputs.au }}/Contents/MacOS/Hillside"
+          lipo -archs "${{ steps.find.outputs.vst3 }}/Contents/MacOS/Hillside"
+          lipo -archs "${{ steps.find.outputs.au }}/Contents/MacOS/Hillside" | grep -q "x86_64" && lipo -archs "${{ steps.find.outputs.au }}/Contents/MacOS/Hillside" | grep -q "arm64" \
+            || { echo "::error::UNIVERSAL: the AU is not universal"; exit 1; }
+          echo "::notice::UNIVERSAL: $(lipo -archs "${{ steps.find.outputs.au }}/Contents/MacOS/Hillside")"
+
+      - name: Sign (ad-hoc, so Apple Silicon Macs will load it)
+        run: |
+          codesign --force --deep --sign - "${{ steps.find.outputs.au }}"
+          codesign --force --deep --sign - "${{ steps.find.outputs.vst3 }}"
+          codesign --verify --deep --strict --verbose=2 "${{ steps.find.outputs.au }}"
+          codesign --verify --deep --strict --verbose=2 "${{ steps.find.outputs.vst3 }}"
+
+      - name: Apple's AU validator (auval)
+        continue-on-error: true
+        run: |
+          mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
+          cp -R "${{ steps.find.outputs.au }}" "$HOME/Library/Audio/Plug-Ins/Components/"
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 3
+          auval -v aumi Hlsd Pdot > auval.log 2>&1; code=$?
+          tail -n 20 auval.log
+          # Result is also written as annotations (shown on the run page and readable through the API).
+          if grep -q "AU VALIDATION SUCCEEDED" auval.log; then
+            echo "::notice::AUVAL: AU VALIDATION SUCCEEDED"
+          else
+            echo "::error::AUVAL: did not succeed (auval exit code $code)"
+            grep -iE "fail|error|cannot|not found" auval.log | head -8 | while IFS= read -r line; do echo "::error::AUVAL: $line"; done
+            exit 1
+          fi
+
+      # pluginval (Tracktion's open-source plugin validator) checks the AU and the VST3 the way hosts use them: loading,
+      # parameters, saving and restoring state, different buffer sizes and sample rates. It never fails the build;
+      # its verdict is written as annotations and as logs inside the package.
+      - name: pluginval (AU and VST3)
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          set +e
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip
+          unzip -q -o pluginval.zip -d pluginval-bin
+          PV="$(find pluginval-bin -type f -name pluginval -perm -u+x | head -n 1)"
+          echo "pluginval binary: $PV"
+          test -n "$PV" || { echo "::warning::PLUGINVAL: could not download pluginval"; exit 0; }
+          "$PV" --version 2>&1 | head -n 1 | while IFS= read -r line; do echo "::notice::PLUGINVAL version: $line"; done
+          for kind in AU VST3; do
+            if [ "$kind" = "AU" ]; then TARGET="$HOME/Library/Audio/Plug-Ins/Components/Hillside.component"; else TARGET="${{ steps.find.outputs.vst3 }}"; fi
+            "$PV" --strictness-level 5 "$TARGET" > "pluginval-$kind.log" 2>&1; code=$?
+            tail -n 25 "pluginval-$kind.log"
+            if [ $code -eq 0 ]; then
+              echo "::notice::PLUGINVAL $kind: passed at strictness level 5"
+            else
+              echo "::error::PLUGINVAL $kind: failed (exit code $code)"
+              grep -iE "fail|error|crash|assert" "pluginval-$kind.log" | head -12 | while IFS= read -r line; do echo "::error::PLUGINVAL $kind: $line"; done
+            fi
+          done
+          exit 0
+
+      - name: Package
+        run: |
+          mkdir -p Hillside-macOS
+          cp -R "${{ steps.find.outputs.au }}"   Hillside-macOS/
+          cp -R "${{ steps.find.outputs.vst3 }}" Hillside-macOS/
+          cp auval.log Hillside-macOS/auval.log 2>/dev/null || true
+          cp pluginval-AU.log pluginval-VST3.log Hillside-macOS/ 2>/dev/null || true
+          cat > Hillside-macOS/INSTALL.txt <<'TXT'
+          HILLSIDE 0.1.0: install and set up
+
+          INSTALL (once per Mac)
+          1. Unzip.
+          2. Open Terminal and run:   xattr -dr com.apple.quarantine ~/Downloads/Hillside-macOS/*
+             (adjust the path if you unzipped elsewhere; this clears the "downloaded from internet" block)
+          3. Double-click Install-Unofficial-Plugin.command in this folder. It asks for your Mac password once and
+             installs the Audio Unit (Hillside.component) for all users. It does not install the VST3.
+          4. Open Logic. If Hillside is missing: Settings > Plug-in Manager, select Hillside,
+             Reset & Rescan Selection.
+
+          FIRST TRY (no mapper needed)
+          5. Make a Software Instrument track. Click an empty MIDI FX slot (above the instrument):
+             Audio Units > particledots > Hillside. Play: your notes sound as normal, and the panel shows the
+             envelope moving (the point on the curve and the A D S R lights).
+
+          THE MAPPER (once per Mac)
+          Logic has no CV, so Hillside sends its envelope as MIDI CC, and a Scripter script turns it into knob moves.
+          6. On that track, in the MIDI FX slot below Hillside: Scripter.
+          7. In Scripter, click "Open Script in Editor". Select everything in the editor and delete it.
+          8. Open "Hillside Mapper (paste into Scripter).txt" from this folder, select all, copy, paste it into the
+             Script Editor, click "Run Script", and close the editor.
+          9. In Scripter's preset menu (top of its window) choose "Save As..." and call it Hillside Mapper.
+             From now on "Hillside Mapper" is in Scripter's preset menu on this Mac.
+
+          EACH TRACK
+          10. MIDI FX slot: Hillside. A slot below it: Scripter with the Hillside Mapper preset.
+          11. In Scripter: set "Lane 1 source" to Envelope (follows the Shape knob) or Linear (always straight).
+              Open "Lane 1 target", choose "Learn plug-in parameter", then move once the knob you want the envelope
+              to move (for example the instrument's filter cutoff).
+          12. "Lane 1 min %" and "Lane 1 max %" set how far that knob sweeps (max below min turns it upside down).
+          Up to 8 lanes per Scripter; for more, add a second Scripter with the same preset below the first.
+          Hillside's CC (channel 16: CC 3, 35, 9, 41) stops at the mapper; your notes and everything else pass
+          through. (Gate A/D/S/R and Trig in the Source menu arrive with Hillside 0.2.0.)
+
+          SHARING A TRACK WITH OGDOAD AND STRANGE DRIFT
+          Each mapper only takes its own plugin's CC. Order the MIDI FX slots:
+          Hillside, Ogdoad, Strange Drift, Ogdoad Mapper, Strange Drift Mapper, Hillside Mapper.
+          (Hillside first, so Ogdoad's trigger notes cannot open Hillside's gate.)
+
+          GOOD TO KNOW
+          - Any held note opens the gate; the envelope releases when the last key is let go. A new key while
+            another is held does not restart it; a note that starts as the last one ends does.
+          - Gate / Trig: in Trig mode the attack always finishes, even for a very short note.
+          - Sustain at 0% gives an AD envelope, at 100% an ASR envelope.
+          - The round Gate button plays the envelope while you hold it.
+          - Stages of about 50 ms or longer move a knob smoothly; shorter ones step, but the top, the sustain level
+            and the final 0 always arrive exactly.
+          TXT
+          cp "tools/mapper/Hillside-Mapper.js" "Hillside-macOS/Hillside Mapper (paste into Scripter).txt"
+          # Easy installer for Logic (double-click; same file in every plugin, unchanged)
+          cp tools/install/Install-Unofficial-Plugin.command Hillside-macOS/
+          chmod +x Hillside-macOS/Install-Unofficial-Plugin.command
+          [ -x Hillside-macOS/Install-Unofficial-Plugin.command ] || { echo "::error::PACKAGE missing Install-Unofficial-Plugin.command"; exit 1; }
+          [ "$(md5 -q Hillside-macOS/Install-Unofficial-Plugin.command)" = "959ac29d9ae17571e61e8dc21870c93e" ] \
+            || { echo "::error::PACKAGE the installer differs from the shared particledots installer"; exit 1; }
+          [ -f "Hillside-macOS/Hillside Mapper (paste into Scripter).txt" ] || { echo "::error::PACKAGE missing the mapper"; exit 1; }
+          grep -q "THE MAPPER" Hillside-macOS/INSTALL.txt || { echo "::error::PACKAGE INSTALL.txt has no mapper steps"; exit 1; }
+          ditto -c -k --keepParent Hillside-macOS Hillside-macOS.zip
+          ls -l Hillside-macOS Hillside-macOS.zip
+          # Package contents are also written as annotations (readable through the API).
+          echo "::notice::PACKAGE archs: $(lipo -archs Hillside-macOS/Hillside.component/Contents/MacOS/Hillside)"
+          echo "::notice::PACKAGE installer: identical to the shared particledots installer"
+          unzip -Z Hillside-macOS.zip | grep -E "Install-Unofficial|INSTALL.txt|auval.log|pluginval|Mapper|Contents/MacOS/Hillside$" | while IFS= read -r line; do echo "::notice::ZIP: $line"; done
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hillside-macOS
+          path: Hillside-macOS.zip
+          if-no-files-found: error
+
+      # A second way to get the package, besides the Actions page: a private DRAFT release (only people with
+      # access to the repo can see it) holding the same zip. Older drafts of this kind are removed first.
+      # A failure here never fails the build.
+      - name: Private draft release with the package
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.draft and (.name | startswith("Hillside test build"))) | .id'); do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+          done
+          gh release create "test-build-${GITHUB_RUN_NUMBER}" Hillside-macOS.zip --draft --target "$GITHUB_SHA" \
+            --title "Hillside test build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
+            --notes "Same package as the Hillside-macOS artifact of this run. Draft: not public."
+          echo "::notice::DRAFT-RELEASE: created test-build-${GITHUB_RUN_NUMBER}"

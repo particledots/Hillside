@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<Hillside pluginVersion="0.1.0">
+  <PARAM id="attack" value="44.81404876708984"/>
+  <PARAM id="decay" value="3.0"/>
+  <PARAM id="gateAOn" value="0.0"/>
+  <PARAM id="gateDOn" value="0.0"/>
+  <PARAM id="gateMode" value="1.0"/>
+  <PARAM id="gateROn" value="0.0"/>
+  <PARAM id="gateSOn" value="0.0"/>
+  <PARAM id="manualGate" value="1.0"/>
+  <PARAM id="outChannel" value="5.0"/>
+  <PARAM id="outEnvOn" value="0.0"/>
+  <PARAM id="outLinOn" value="0.0"/>
+  <PARAM id="release" value="119.6842041015625"/>
+  <PARAM id="sendAs" value="1.0"/>
+  <PARAM id="shape" value="11.11111164093018"/>
+  <PARAM id="sustain" value="77.77777862548828"/>
+  <PARAM id="trigOn" value="0.0"/>
+</Hillside>

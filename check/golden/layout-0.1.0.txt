@@ -1,0 +1,16 @@
+0 attack v1 | Attack | range 3.000..10000.000 step 0.000 | default 5.000 | centre 173.205
+1 decay v1 | Decay | range 3.000..12000.000 step 0.000 | default 300.000 | centre 189.737
+2 sustain v1 | Sustain | range 0.000..100.000 step 0.000 | default 50.000 | centre 50.000
+3 release v1 | Release | range 3.000..12000.000 step 0.000 | default 400.000 | centre 189.737
+4 shape v1 | Shape | range 0.000..100.000 step 0.000 | default 100.000 | centre 50.000
+5 gateMode v1 | Gate/Trig | range 0.000..1.000 step 1.000 | default 0.000 | centre 0.000 | choices Gate;Trig
+6 manualGate v1 | Gate button | range 0.000..1.000 step 1.000 | default 0.000 | centre 1.000 | switch
+7 outChannel v1 | MIDI out channel | range 1.000..16.000 step 1.000 | default 16.000 | centre 8.000
+8 outEnvOn v1 | Envelope out | range 0.000..1.000 step 1.000 | default 1.000 | centre 1.000 | switch
+9 outLinOn v1 | Linear out | range 0.000..1.000 step 1.000 | default 1.000 | centre 1.000 | switch
+10 gateAOn v1 | Gate A out | range 0.000..1.000 step 1.000 | default 1.000 | centre 1.000 | switch
+11 gateDOn v1 | Gate D out | range 0.000..1.000 step 1.000 | default 1.000 | centre 1.000 | switch
+12 gateSOn v1 | Gate S out | range 0.000..1.000 step 1.000 | default 1.000 | centre 1.000 | switch
+13 gateROn v1 | Gate R out | range 0.000..1.000 step 1.000 | default 1.000 | centre 1.000 | switch
+14 trigOn v1 | Trig out | range 0.000..1.000 step 1.000 | default 1.000 | centre 1.000 | switch
+15 sendAs v1 | Send as | range 0.000..2.000 step 1.000 | default 0.000 | centre 1.000 | choices CC;Note;Both
