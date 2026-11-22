@@ -6,8 +6,17 @@ is not a copy, contains no Instruō code or artwork, and is not affiliated with 
 with no published firmware; its version 1 manual was used only to understand what the controls do. The envelope maths
 is our own.
 
-Status: **version 0.2.0, milestone 2 of 2 built and checked in CI; waiting for Bryn's Logic test on the Intel Mac.**
-Milestone 1 (0.1.0) finished: tested in Logic on both Macs on 2026-11-22 and working.
+Status: **version 0.2.0, milestone 2 of 2 finished: tested by Bryn in Logic on the Intel Mac on 2026-11-22 and
+working. Hillside is complete.** Milestone 1 (0.1.0) finished: tested in Logic on both Macs on 2026-11-22 and working.
+
+Milestone 2 test result (Bryn, Intel Mac with macOS 12.7.8 and Logic 10.7.8): every step worked as described, no
+issues: an old project opened with its settings and the gate block live, version 0.2.0 shown; the Gate A, D, S, R
+lights came on in turn and Trig flashed at each stage; Send as Note played the gate notes (E1 to G♯1) with the stages
+and everything went quiet after the release; with Gate S on, Stop, changing Send as, changing the MIDI out channel,
+switching Gate S off and bypass each left no note hanging; the mapper's Gate S lane moved a filter cutoff up during the
+sustain and back at the release; removing Hillside from its slot while a gate note was on left no note hanging.
+CI (run 45045194505): engine test 720 checks, mapper test 111 checks, plugin-layer check 275 checks, auval succeeded
+(aumi), pluginval level 5 passed (AU and VST3).
 
 Milestone 1 test result (Bryn, M4 Mac mini with macOS Tahoe and Logic 11.2.2, and Intel Mac with macOS 12.7.8 and
 Logic 10.7.8): every step worked as described, no issues: install, loads in a MIDI FX slot with the window as drawn;

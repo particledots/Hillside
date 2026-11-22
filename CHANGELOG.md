@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.2.0 (milestone 2: built and checked in CI; waiting for the Logic test on the Intel Mac)
+## 0.2.0 (milestone 2 finished: tested in Logic on the Intel Mac, 2026-11-22)
+
+- Logic test result (Bryn, Intel Mac, macOS 12.7.8, Logic 10.7.8): every step worked as described, no issues: old
+  project loads with the gate block live, gate and Trig lights, Send as Note plays the gate notes with the stages,
+  Stop / Send as / channel / Gate S switch / bypass while Gate S is on leave no note hanging, the mapper's Gate S lane
+  moves a filter cutoff, removing Hillside mid-note leaves no note hanging. CI (run 45045194505): engine test 720
+  checks, mapper test 111 checks, plugin-layer check 275 checks, auval succeeded (aumi), pluginval level 5 passed
+  (AU and VST3).
 
 - The four stage gates and the combined trigger are live: Gate A, D, S, R (high for the whole stage, at least 20 ms)
   and Trig (20 ms at the start of every stage that runs; closer triggers merge), sent as CC 85-89, notes 40-44
